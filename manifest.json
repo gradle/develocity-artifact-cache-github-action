@@ -1,0 +1,10 @@
+{
+  "version": "1.5.0",
+  "sha256": "1908b4b8d5e593c64b6848473bc8479a19489855af540e9f969a78f29d77b0a2",
+  "minimumJdkVersion": 21,
+  "knownVersions": {
+    "1.2.0": "e290b07d517ee2b7bd48347e89b9b1a1dea6468c39b9438fae8c68c51e9d2361",
+    "1.3.0": "ae9656422360dca048b1987918fcac540c4aba6e07f04fa61128e96bce2aa6dd",
+    "1.4.0": "0302e7b70801b7974f65d85463c599058a54adac6e790267fadfce98be833ad8"
+  }
+}
