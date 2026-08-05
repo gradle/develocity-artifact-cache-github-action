@@ -32,11 +32,12 @@ inputs:
     required: false
   matrix:
     description: >-
-      Pass ${{ toJSON(matrix) }} to enable a best-effort warning when the build
-      matrix has axes the auto-generated cache name does not isolate (anything
-      beyond OS and arch, e.g. a Java or tool version), so those matrix jobs
-      would share one cache. Optional; no warning is emitted when unset. Isolate
-      a sensitive axis by adding a dedicated ac-image-names entry.
+      Serialize the job's matrix context with toJSON and pass it here to enable a
+      best-effort warning when the build matrix has axes the auto-generated cache
+      name does not isolate (anything beyond OS and arch, e.g. a Java or tool
+      version), so those matrix jobs would share one cache. Optional; no warning
+      is emitted when unset. Isolate a sensitive axis by adding a dedicated
+      ac-image-names entry.
     required: false
   cache-read-only:
     description: When true, skip the post-step store call.
