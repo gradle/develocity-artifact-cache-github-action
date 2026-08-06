@@ -43,6 +43,14 @@ inputs:
     description: When true, skip the post-step store call.
     required: false
     default: "false"
+  cache-store-on-failure:
+    description: >-
+      When true, store the cache even if the build failed. Defaults to false: the
+      post step stores only when the job succeeds, so a failed build does not
+      overwrite the cache. Independent of cache-read-only, which skips the store
+      entirely.
+    required: false
+    default: "false"
   ac-cli-version:
     description: >-
       AC CLI version to download. Defaults to the pinned general-availability
@@ -74,3 +82,10 @@ runs:
   using: node24
   main: dist/main/index.js
   post: dist/post/index.js
+  # Gate the store on job success. By default the post step stores only when the
+  # job succeeded, so a failed build never overwrites the cache. The main step
+  # exports DV_AC_STORE_ON_FAILURE from the cache-store-on-failure input to carry
+  # the opt-in here, because post-if cannot read an action input directly, only
+  # the workflow env context. If the runner ever failed to surface that variable,
+  # this degrades to a plain success() — the safe default still holds.
+  post-if: success() || env.DV_AC_STORE_ON_FAILURE == 'true'
