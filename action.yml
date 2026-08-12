@@ -15,29 +15,34 @@ inputs:
     required: true
   develocity-access-key:
     description: >-
-      Develocity access key used to authenticate the AC CLI. Provide the raw
-      key value for the develocity-url host — not the host=key form used by the
-      sources below. Optional: when unset, it is resolved from the
-      DEVELOCITY_ACCESS_KEY environment variable (host=key form), then from
-      keys.properties (~/.gradle/develocity or ~/.m2/.develocity) for the
-      develocity-url host, matching the CLI's own lookup. The input takes
-      precedence over the environment variable and the key file; if none yields
-      a key, all cache activity is skipped.
+      Develocity access key for the develocity-url host, used to authenticate the
+      AC CLI. Provide it in host=key form (e.g. "develocity.example.com=<key>" or
+      a ";"-separated host1=key1;host2=key2 list), matching the
+      DEVELOCITY_ACCESS_KEY format; a bare key value is not accepted. The action
+      uses the entry for the develocity-url host. This input is the only key
+      source: the action does not read the DEVELOCITY_ACCESS_KEY environment
+      variable or keys.properties. The action immediately exchanges this
+      long-lived key for a short-lived Develocity token and uses that token only
+      for its own cache restore/store; it does NOT set DEVELOCITY_ACCESS_KEY for
+      other steps, so neither the long-lived key nor the token is propagated to
+      the rest of the workflow. Steps that publish Build Scans should obtain their
+      own token (e.g. via setup-gradle). Required to enable caching, but the action
+      never fails the build for a missing or unmatched key — it warns and skips all
+      cache activity for the job.
+    required: true
+  develocity-token-expiry:
+    description: >-
+      Lifetime, in hours, of the short-lived Develocity token the action obtains
+      from develocity-access-key for its own cache restore/store. Defaults to 2.
+      Increase it if a build runs long enough that the token could expire before
+      the post-step store runs.
     required: false
+    default: "2"
   ac-image-names:
     description: >-
       Ordered image names, one per line. The first is the primary — the name the
       cache is stored under and the first that restore tries — and the rest are
       restore-only fallbacks. Defaults to the AC CLI's auto-generated name.
-    required: false
-  matrix:
-    description: >-
-      Serialize the job's matrix context with toJSON and pass it here to enable a
-      best-effort warning when the build matrix has axes the auto-generated cache
-      name does not isolate (anything beyond OS and arch, e.g. a Java or tool
-      version), so those matrix jobs would share one cache. Optional; no warning
-      is emitted when unset. Isolate a sensitive axis by adding a dedicated
-      ac-image-names entry.
     required: false
   cache-read-only:
     description: When true, skip the post-step store call.
@@ -59,13 +64,23 @@ inputs:
   ac-cli-repository:
     description: >-
       JAR download source. Defaults to the public Develocity download URL. Set
-      to an internal mirror for air-gapped runners.
+      to an internal mirror for air-gapped runners. Must be an https URL unless
+      ac-cli-repository-allow-insecure is true.
     required: false
   ac-cli-repository-header:
     description: >-
       A single "Name: Value" HTTP header sent on the JAR download, for an
       authenticated mirror. Provide this via a GitHub secret to ensure it is masked in logs. Not forwarded to the CLI.
     required: false
+  ac-cli-repository-allow-insecure:
+    description: >-
+      Allow downloading the AC CLI from a plain-http ac-cli-repository. Defaults
+      to false, so an http URL is rejected. Only enable for a trusted internal
+      or GitHub Enterprise mirror without TLS: over http the download and any
+      ac-cli-repository-header credential are sent in cleartext, with no server
+      authentication.
+    required: false
+    default: "false"
   ac-cli-sha256:
     description: >-
       Expected JAR SHA-256. Verifies a pinned version the distribution manifest

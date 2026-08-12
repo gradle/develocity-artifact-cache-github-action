@@ -72,38 +72,54 @@ then runs only when the **job succeeds** (it is skipped if a job step failed) an
 | Input | Required | Default | Description |
 | --- | --- | --- | --- |
 | `develocity-url` | yes | (none) | Develocity server URL. |
-| `develocity-access-key` | no | (none) | Raw access key for `develocity-url`. Optional: falls back to the `DEVELOCITY_ACCESS_KEY` env var or `keys.properties` (see [Authentication](#authentication)). |
+| `develocity-access-key` | yes | (none) | Access key for `develocity-url` in `host=key` form (the only key source). The action exchanges it for a short-lived token used **only** for its own cache restore/store — it is not exported to other steps. Required to enable caching; never fails the build if missing — it warns and skips (see [Authentication](#authentication)). |
+| `develocity-token-expiry` | no | `2` | Lifetime, in hours, of the short-lived token obtained from `develocity-access-key`. Raise it only if a build could run long enough for the token to expire before the post-step store (see [Authentication](#authentication)). |
 | `ac-image-names` | no | (none) | Ordered image names, one per line: the first is the primary (stored under, tried first on restore), the rest are restore-only fallbacks. Replaces the auto-generated name (see [Cache image names](#cache-image-names)). |
-| `matrix` | no | (none) | Pass `${{ toJSON(matrix) }}` to get a best-effort warning when the build matrix has axes the auto-generated name does not isolate (see [Matrix builds](#matrix-builds-share-a-cache-across-axes-other-than-operating-system-and-architecture)). |
 | `cache-read-only` | no | `false` | When `true`, restore only: the post step skips the store. |
 | `cache-store-on-failure` | no | `false` | When `true`, store even if the job failed. By default the store runs only when the job succeeds. |
 | `ac-cli-version` | no | pinned general-availability version | Artifact Cache CLI version to download. Defaults to the tested version the action pins; usually leave unset (see [Versioning](#versioning)). |
-| `ac-cli-repository` | no | public URL | JAR download source. Set to an internal mirror for air-gapped runners. |
+| `ac-cli-repository` | no | public URL | JAR download source. Set to an internal mirror for air-gapped runners. Must be an `https` URL unless `ac-cli-repository-allow-insecure` is set. |
 | `ac-cli-repository-header` | no | (none) | A single `Name: Value` HTTP header for an authenticated mirror. Supply via a secret. |
+| `ac-cli-repository-allow-insecure` | no | `false` | Allow a plain-`http` `ac-cli-repository`. The default rejects `http`; enable only for a trusted internal or GitHub Enterprise mirror without TLS (over `http` the download and any `ac-cli-repository-header` credential are sent in cleartext). |
 | `ac-cli-sha256` | no | (built in) | Expected JAR SHA-256; needed only to verify a version the action does not already ship a checksum for. |
 | `additional-cli-args` | no | (none) | Extra CLI arguments (one per line) appended to restore and store. The action-managed flags (`--dv-server`, `--image-name`, `--cache-metrics-file`, `--dv-edge`) are rejected. |
 
 ## Authentication
 
-The action needs a Develocity access key for the server named by `develocity-url`. It
-resolves one the same way the Artifact Cache CLI does, in descending precedence:
+The action needs a Develocity access key for the server named by `develocity-url`,
+supplied through the **`develocity-access-key` input**. This input is the **only** key
+source: the action does **not** read the `DEVELOCITY_ACCESS_KEY` environment variable or
+`keys.properties`, so it never authenticates with an ambient key you did not explicitly
+pass to it.
 
-1. the **`develocity-access-key` input**, the **raw key value** for the `develocity-url`
-   host (wins over everything below);
-2. a non-empty **`DEVELOCITY_ACCESS_KEY` environment variable**;
-3. **`keys.properties`** (`~/.gradle/develocity/keys.properties`, then
-   `~/.m2/.develocity/keys.properties`), the entry for the `develocity-url` host.
+Provide it in **`host=key` form** — e.g. `develocity.example.com=<key>`, or a
+`;`-separated `host1=key1;host2=key2` list — matching the `DEVELOCITY_ACCESS_KEY` format
+used across the Develocity ecosystem (the DV build agents, `keys.properties`, and
+`setup-gradle`). A bare key value is not accepted. The action uses the entry for the
+`develocity-url` host, so a key for another host is never sent to this server.
 
-So the `develocity-access-key` input takes precedence over both the
-`DEVELOCITY_ACCESS_KEY` environment variable and `keys.properties`. Only the first source
-that exists is consulted (a non-empty environment variable, or the first key file present
-on disk), and resolution does not fall through to a later source that lacks an entry for
-the host, matching the CLI. The environment variable and key files are host-scoped, in
-the CLI's `host=key` form.
+The input is **required** to enable caching, but the action is fail-safe: if it is missing,
+not in `host=key` form, or has no entry for the `develocity-url` host, the action **warns
+and skips all cache activity for the job** rather than failing the build.
 
-The `develocity-access-key` input is **optional**: omit it to rely on the environment
-variable or a key file. If no key is found in any source, the action **skips all cache
-activity for the job** rather than failing the build.
+### Short-lived access tokens
+
+Develocity access keys are long-lived, so exposing one to a whole workflow is a risk if it
+leaks. To avoid that, the action immediately exchanges the key you provide for a
+**short-lived Develocity token** and uses that token **only for its own cache restore and
+store** — it hands the token to the Artifact Cache CLI through a private, subprocess-scoped
+environment variable. The long-lived key never leaves this action. If the exchange fails, the
+action warns and skips rather than falling back to the long-lived key.
+
+The action does **not** set `DEVELOCITY_ACCESS_KEY` (or the token) for any other step. A cache
+action shouldn't propagate credentials to the rest of the build, and — unlike Gradle, which
+has `setup-gradle` — other build tools have no equivalent that would expect it. If a later step
+needs to authenticate with Develocity (for example, to publish a Build Scan), give it its own
+credentials: `setup-gradle`, for instance, performs the same key-to-short-lived-token exchange
+and exports it for Gradle builds.
+
+The token is valid for **2 hours** by default; raise `develocity-token-expiry` only if a build
+runs long enough that the token could expire before the post-step store runs.
 
 ## Security
 
@@ -154,9 +170,8 @@ guard; see [Security](#security).) The action warns when an operation reports a 
   recorded by the CLI, warns that some cache activity did not complete. The build
   continues, just less cached.
 - **Rejected access key**: when the Develocity server rejects the key (unauthorized), the
-  action warns specifically and points at the `develocity-access-key` input (or
-  `DEVELOCITY_ACCESS_KEY`); cache activity is skipped for that step and the build still
-  runs.
+  action warns specifically and points at the `develocity-access-key` input; cache
+  activity is skipped for that step and the build still runs.
 
 A cache **miss** is expected: it is not a failure and never warns.
 
@@ -204,40 +219,10 @@ entries yourself:
 
 ### Matrix builds share a cache across axes other than operating system and architecture
 
-The auto-generated name isolates by job, runner operating system, and runner architecture,
-but **not** by other
-matrix axes such as a Java or build-tool version. Jobs that differ only in such an axis
-therefore **share one cache** and can overwrite each other's content. Pass your matrix to
-get a best-effort warning when this happens:
-
-```yaml
-- uses: gradle/develocity-artifact-cache-github-action@v1
-  with:
-    develocity-url: https://develocity.example.com
-    matrix: ${{ toJSON(matrix) }}
-```
-
-`matrix` is your workflow's `matrix` context serialized with `toJSON`. There is **no
-schema the action defines**: it is whatever axes your `strategy.matrix` declares, passed
-as a JSON object of `axis: value` for the current job. For example:
-
-```yaml
-strategy:
-  matrix:
-    java-version: [17, 21]
-    os: [ubuntu-latest]
-steps:
-  - uses: gradle/develocity-artifact-cache-github-action@v1
-    with:
-      develocity-url: https://develocity.example.com
-      matrix: ${{ toJSON(matrix) }} # e.g. {"java-version":"17","os":"ubuntu-latest"}
-```
-
-These axis names are treated as **already isolated** by the auto-generated cache name:
-`os`, `arch`, and similar operating-system and architecture axes. **Any other axis** (for
-example `java-version`, `gradle-version`) is non-isolating and triggers the warning. The
-check sees only the current job's resolved values, so a single-valued extra axis can warn
-even when no collision is possible, a harmless false positive.
+The auto-generated cache name isolates by job, runner operating system, and runner
+architecture, but **not** by other matrix axes such as a Java or build-tool version. Jobs
+that differ only in such an axis therefore **share one cache** and can overwrite each
+other's content.
 
 To **isolate** a sensitive axis, add a dedicated `ac-image-names` entry that includes its
 value. Since this replaces the auto-generated names, add your own fallback entry to keep
@@ -325,8 +310,9 @@ The migration has the same shape wherever the CLI is used:
    store-only-on-success gate (`if: success()` on the old store step) needs nothing — it
    is the action's default; set `cache-store-on-failure: true` only if you instead want to
    store after a failed build.
-5. **Matrixed jobs:** pass `matrix: ${{ toJSON(matrix) }}` so you are warned when matrix
-   axes beyond the operating system and architecture would share one cache (see
+5. **Matrixed jobs:** if your matrix varies beyond the operating system and architecture,
+   add a dedicated `ac-image-names` entry to isolate that axis so those jobs do not share
+   one cache (see
    [Matrix builds](#matrix-builds-share-a-cache-across-axes-other-than-operating-system-and-architecture)).
 
 A custom setup may also do things this action does not cover, for example uploading the
@@ -339,7 +325,7 @@ that scope.**
 | --- | --- |
 | separate **restore** step **and** **store** step | one `uses:` step (main restores, post stores) |
 | `DV_SERVER` | `develocity-url` input |
-| `DEVELOCITY_ACCESS_KEY` (env) | keep the env var, or use the `develocity-access-key` input |
+| `DEVELOCITY_ACCESS_KEY` (env) | pass it to the `develocity-access-key` input (the action does not read the env var) |
 | `--image-name` / `ARTIFACT_CACHE_IMAGE` | `ac-image-names` input |
 | extra CLI flags (for example `--gradle-home`, often via `ARTIFACT_CACHE_OPTS`) | `additional-cli-args` input (one per line) |
 | CLI version pin (for example `ARTIFACT_CACHE_CLI_VERSION`) | `ac-cli-version`, usually omitted (defaults to the pinned version) |
