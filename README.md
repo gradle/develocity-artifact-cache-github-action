@@ -1,6 +1,6 @@
 # Develocity Artifact Cache GitHub Action
 
-Cache Gradle, Maven, npm, pip, and Sonar dependencies and build outputs in GitHub
+Cache Gradle, Maven, npm, pip, Playwright, and Sonar dependencies and build outputs in GitHub
 Actions with the [Develocity Artifact Cache](https://docs.develocity.ai/artifact-cache/),
 in a single workflow step. The action restores the cache before your build and stores
 it afterward automatically.
@@ -15,7 +15,7 @@ you:
 - **One step, both phases.** The action restores in its main step and stores in an
   automatic post step. You do not write or order a separate store step, and cache
   activity never fails the build.
-- **Every cache type, autodetected.** It caches Gradle, Maven, npm, pip, and Sonar
+- **Every cache type, autodetected.** It caches Gradle, Maven, npm, pip, Playwright, and Sonar
   content automatically, with no per-type configuration.
 - **Cache images that work out of the box.** Images are generated per job and isolated by
   runner operating system and architecture, with smart fallbacks to the base branch and
@@ -61,11 +61,40 @@ jobs:
       - run: ./gradlew build # uses the restored cache; its output is stored after the job
 ```
 
-Place the action **before** your build so the restore happens first. By default the store
-then runs only when the **job succeeds** (it is skipped if a job step failed) and
-**never fails the build**. To make the cache **read-only** (restore, but never store), set
-`cache-read-only: true`; to store even after a failed build, set
-`cache-store-on-failure: true`.
+Place the action **before** your build so the restore happens first. The store then runs
+only when the **job succeeds** (it is skipped if a job step failed) and **never fails the
+build**. To make the cache **read-only** (restore, but never store), set
+`cache-read-only: true`.
+
+### Using with `setup-gradle`
+
+When your workflow also uses [`gradle/actions/setup-gradle`](https://github.com/gradle/actions),
+two things matter:
+
+1. **Apply `setup-gradle` before this action.** `setup-gradle` establishes the Gradle User
+   Home for the job — it creates the directory, writes its init scripts, and exports
+   `GRADLE_USER_HOME`. Running it first lets this action's CLI auto-detect that same Gradle
+   User Home, so the cache is **restored into, and stored from, the location your Gradle
+   build actually uses**. If this action ran first, it would resolve the default Gradle User
+   Home, which may not match the one `setup-gradle` goes on to configure — notably on
+   Windows, where `setup-gradle` can relocate it.
+2. **Set `cache-disabled: true` on `setup-gradle`.** This action already caches the Gradle
+   dependencies that `setup-gradle`'s own Gradle User Home cache would otherwise store.
+   Disabling `setup-gradle`'s caching defers to this action and avoids both mechanisms
+   caching the same content.
+
+```yaml
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-disabled: true # defer dependency caching to the Artifact Cache action
+
+      - uses: gradle/develocity-artifact-cache-github-action@v1
+        with:
+          develocity-url: https://develocity.example.com
+          develocity-access-key: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
+
+      - run: ./gradlew build
+```
 
 ## Inputs
 
@@ -74,14 +103,13 @@ then runs only when the **job succeeds** (it is skipped if a job step failed) an
 | `develocity-url` | yes | (none) | Develocity server URL. |
 | `develocity-access-key` | yes | (none) | Access key for `develocity-url` in `host=key` form (the only key source). The action exchanges it for a short-lived token used **only** for its own cache restore/store — it is not exported to other steps. Required to enable caching; never fails the build if missing — it warns and skips (see [Authentication](#authentication)). |
 | `develocity-token-expiry` | no | `2` | Lifetime, in hours, of the short-lived token obtained from `develocity-access-key`. Raise it only if a build could run long enough for the token to expire before the post-step store (see [Authentication](#authentication)). |
-| `ac-image-names` | no | (none) | Ordered image names, one per line: the first is the primary (stored under, tried first on restore), the rest are restore-only fallbacks. Replaces the auto-generated name (see [Cache image names](#cache-image-names)). |
+| `image-names` | no | (none) | Ordered image names, one per line: the first is the primary (stored under, tried first on restore), the rest are restore-only fallbacks. Replaces the auto-generated name (see [Cache image names](#cache-image-names)). |
 | `cache-read-only` | no | `false` | When `true`, restore only: the post step skips the store. |
-| `cache-store-on-failure` | no | `false` | When `true`, store even if the job failed. By default the store runs only when the job succeeds. |
-| `ac-cli-version` | no | pinned general-availability version | Artifact Cache CLI version to download. Defaults to the tested version the action pins; usually leave unset (see [Versioning](#versioning)). |
-| `ac-cli-repository` | no | public URL | JAR download source. Set to an internal mirror for air-gapped runners. Must be an `https` URL unless `ac-cli-repository-allow-insecure` is set. |
-| `ac-cli-repository-header` | no | (none) | A single `Name: Value` HTTP header for an authenticated mirror. Supply via a secret. |
-| `ac-cli-repository-allow-insecure` | no | `false` | Allow a plain-`http` `ac-cli-repository`. The default rejects `http`; enable only for a trusted internal or GitHub Enterprise mirror without TLS (over `http` the download and any `ac-cli-repository-header` credential are sent in cleartext). |
-| `ac-cli-sha256` | no | (built in) | Expected JAR SHA-256; needed only to verify a version the action does not already ship a checksum for. |
+| `cli-version` | no | pinned general-availability version | Artifact Cache CLI version to download. Defaults to the tested version the action pins; usually leave unset (see [Versioning](#versioning)). |
+| `cli-repository` | no | public URL | JAR download source. Set to an internal mirror for air-gapped runners. Must be an `https` URL unless `cli-repository-allow-insecure` is set. |
+| `cli-repository-header` | no | (none) | A single `Name: Value` HTTP header for an authenticated mirror. Supply via a secret. |
+| `cli-repository-allow-insecure` | no | `false` | Allow a plain-`http` `cli-repository`. The default rejects `http`; enable only for a trusted internal or GitHub Enterprise mirror without TLS (over `http` the download and any `cli-repository-header` credential are sent in cleartext). |
+| `cli-sha256` | no | (built in) | Expected JAR SHA-256; needed only to verify a version the action does not already ship a checksum for. |
 | `additional-cli-args` | no | (none) | Extra CLI arguments (one per line) appended to restore and store. The action-managed flags (`--dv-server`, `--image-name`, `--cache-metrics-file`, `--dv-edge`) are rejected. |
 
 ## Authentication
@@ -135,7 +163,7 @@ the workflow log.
 
 ## Cache coverage and observability
 
-The action caches **Gradle, Maven, npm, pip, and Sonar** automatically: it invokes the Artifact Cache
+The action caches **Gradle, Maven, npm, pip, Playwright, and Sonar** automatically: it invokes the Artifact Cache
 CLI, which autodetects the matching project content on the runner and caches each type it
 finds, with no per-type enable input. To exclude a type (for example, to skip npm in a
 large monorepo), pass `--no-autodetect <type>` through `additional-cli-args`.
@@ -195,16 +223,16 @@ cache of its own can still restore from a related branch:
 
 **Store** always writes to the single primary name.
 
-### Overriding with `ac-image-names`
+### Overriding with `image-names`
 
-Set `ac-image-names` (one name per line) to take control of naming. It is a single
+Set `image-names` (one name per line) to take control of naming. It is a single
 ordered list:
 
 - the **first** entry is the **primary**, the name the cache is **stored** under and the
   first that **restore** tries;
 - the **rest** are **restore-only fallbacks**, tried in order, stopping at the first hit.
 
-Setting `ac-image-names` **replaces** the auto-generated names entirely, including the
+Setting `image-names` **replaces** the auto-generated names entirely, including the
 pull request and push fallbacks above, so list any fallbacks you want as additional
 entries yourself:
 
@@ -212,7 +240,7 @@ entries yourself:
 - uses: gradle/develocity-artifact-cache-github-action@v1
   with:
     develocity-url: https://develocity.example.com
-    ac-image-names: |
+    image-names: |
       my-project-${{ github.ref_name }}
       my-project-main
 ```
@@ -224,12 +252,12 @@ architecture, but **not** by other matrix axes such as a Java or build-tool vers
 that differ only in such an axis therefore **share one cache** and can overwrite each
 other's content.
 
-To **isolate** a sensitive axis, add a dedicated `ac-image-names` entry that includes its
+To **isolate** a sensitive axis, add a dedicated `image-names` entry that includes its
 value. Since this replaces the auto-generated names, add your own fallback entry to keep
 the cross-branch seeding described above:
 
 ```yaml
-    ac-image-names: |
+    image-names: |
       my-project-java${{ matrix.java-version }}-${{ github.ref_name }}
       my-project-java${{ matrix.java-version }}-main
 ```
@@ -254,8 +282,8 @@ JDK (GitHub-hosted runners do; see above):
 | macOS | x64, ARM64 |
 | Windows | x64 |
 
-It also runs on self-hosted Linux (x64) runners. All five cache types (Gradle, Maven,
-npm, pip, Sonar) are supported on every listed runner.
+It also runs on self-hosted Linux (x64) runners. All six cache types (Gradle, Maven,
+npm, pip, Playwright, Sonar) are supported on every listed runner.
 
 ### JVM warmup
 
@@ -265,18 +293,18 @@ cache size.
 
 ## Versioning
 
-The action pins a **default Artifact Cache CLI version** (`ac-cli-version` defaults to that
+The action pins a **default Artifact Cache CLI version** (`cli-version` defaults to that
 pinned general-availability version), and that default advances with each Artifact Cache
 CLI release. Two consequences for consumers:
 
 - The action tracks a **tested default version**, so most users need not set
-  `ac-cli-version` at all.
+  `cli-version` at all.
 - **A change to the minimum required JDK is a breaking change and forces a major version
   bump of the action.** Pinning a newer CLI whose floor your runners do not meet makes the
   action skip caching (it never fails the build), so a new major version signals a
   JDK-floor change you must accommodate.
 
-To pin or override, set `ac-cli-version` (and `ac-cli-sha256` to verify a version the
+To pin or override, set `cli-version` (and `cli-sha256` to verify a version the
 action does not already ship a checksum for).
 
 ## Configuration handled by the CLI
@@ -285,7 +313,7 @@ Some configuration is handled by the CLI rather than exposed as an action input:
 
 - **Cache cleanup** is automatic, so there is no cleanup input.
 - **Cache-type selection** is by autodetection: the CLI detects Gradle, Maven, npm, pip,
-  and Sonar. To exclude a type, pass `--no-autodetect <type>` through
+  Playwright, and Sonar. To exclude a type, pass `--no-autodetect <type>` through
   `additional-cli-args`.
 - **Tool homes** are resolved from the standard environment variables CI sets. For a
   non-standard Maven local repository, pass `--maven-repository <path>` through
@@ -307,11 +335,10 @@ The migration has the same shape wherever the CLI is used:
    wiring; the action does all of it.
 4. **Move any restore-time condition.** If the old restore step had an `if:` gate for
    whether to use the cache, put the same condition on the action step. A
-   store-only-on-success gate (`if: success()` on the old store step) needs nothing — it
-   is the action's default; set `cache-store-on-failure: true` only if you instead want to
-   store after a failed build.
+   store-only-on-success gate (`if: success()` on the old store step) needs nothing — the
+   action always stores only when the job succeeds.
 5. **Matrixed jobs:** if your matrix varies beyond the operating system and architecture,
-   add a dedicated `ac-image-names` entry to isolate that axis so those jobs do not share
+   add a dedicated `image-names` entry to isolate that axis so those jobs do not share
    one cache (see
    [Matrix builds](#matrix-builds-share-a-cache-across-axes-other-than-operating-system-and-architecture)).
 
@@ -326,17 +353,16 @@ that scope.**
 | separate **restore** step **and** **store** step | one `uses:` step (main restores, post stores) |
 | `DV_SERVER` | `develocity-url` input |
 | `DEVELOCITY_ACCESS_KEY` (env) | pass it to the `develocity-access-key` input (the action does not read the env var) |
-| `--image-name` / `ARTIFACT_CACHE_IMAGE` | `ac-image-names` input |
+| `--image-name` / `ARTIFACT_CACHE_IMAGE` | `image-names` input |
 | extra CLI flags (for example `--gradle-home`, often via `ARTIFACT_CACHE_OPTS`) | `additional-cli-args` input (one per line) |
-| CLI version pin (for example `ARTIFACT_CACHE_CLI_VERSION`) | `ac-cli-version`, usually omitted (defaults to the pinned version) |
+| CLI version pin (for example `ARTIFACT_CACHE_CLI_VERSION`) | `cli-version`, usually omitted (defaults to the pinned version) |
 | manual JAR download, SHA-256 verify, and JDK wiring | built in |
 
 Two behavior differences to note:
 
-- **Store timing.** By default the post step stores only when the **job succeeds**, the
-  same effect as an `if: success()` gate on the old store step (best-effort, never failing
-  the build). Set `cache-store-on-failure: true` to store regardless of job outcome, or
-  `cache-read-only: true` to never store.
+- **Store timing.** The post step stores only when the **job succeeds**, the same effect
+  as an `if: success()` gate on the old store step (best-effort, never failing the build).
+  Set `cache-read-only: true` to never store.
 - **Logs.** The action does not upload an `artifact-cache.log` artifact; cache activity
   appears in the **job summary** and workflow log. Drop any log-upload step, or add your
   own if you still want the artifact.

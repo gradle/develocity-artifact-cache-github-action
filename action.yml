@@ -1,5 +1,5 @@
 name: Develocity Artifact Cache GitHub Action
-description: Restore and store Gradle, Maven, npm, pip, and Sonar build dependencies through the Develocity Artifact Cache.
+description: Restore and store Gradle, Maven, npm, pip, Playwright, and Sonar build dependencies through the Develocity Artifact Cache.
 author: Develocity
 
 # Marketplace listing branding. Matches the gradle/actions house style (color:
@@ -38,7 +38,7 @@ inputs:
       the post-step store runs.
     required: false
     default: "2"
-  ac-image-names:
+  image-names:
     description: >-
       Ordered image names, one per line. The first is the primary — the name the
       cache is stored under and the first that restore tries — and the rest are
@@ -48,40 +48,32 @@ inputs:
     description: When true, skip the post-step store call.
     required: false
     default: "false"
-  cache-store-on-failure:
-    description: >-
-      When true, store the cache even if the build failed. Defaults to false: the
-      post step stores only when the job succeeds, so a failed build does not
-      overwrite the cache. Independent of cache-read-only, which skips the store
-      entirely.
-    required: false
-    default: "false"
-  ac-cli-version:
+  cli-version:
     description: >-
       AC CLI version to download. Defaults to the pinned general-availability
       version resolved from the distribution manifest.
     required: false
-  ac-cli-repository:
+  cli-repository:
     description: >-
       JAR download source. Defaults to the public Develocity download URL. Set
       to an internal mirror for air-gapped runners. Must be an https URL unless
-      ac-cli-repository-allow-insecure is true.
+      cli-repository-allow-insecure is true.
     required: false
-  ac-cli-repository-header:
+  cli-repository-header:
     description: >-
       A single "Name: Value" HTTP header sent on the JAR download, for an
       authenticated mirror. Provide this via a GitHub secret to ensure it is masked in logs. Not forwarded to the CLI.
     required: false
-  ac-cli-repository-allow-insecure:
+  cli-repository-allow-insecure:
     description: >-
-      Allow downloading the AC CLI from a plain-http ac-cli-repository. Defaults
+      Allow downloading the AC CLI from a plain-http cli-repository. Defaults
       to false, so an http URL is rejected. Only enable for a trusted internal
       or GitHub Enterprise mirror without TLS: over http the download and any
-      ac-cli-repository-header credential are sent in cleartext, with no server
+      cli-repository-header credential are sent in cleartext, with no server
       authentication.
     required: false
     default: "false"
-  ac-cli-sha256:
+  cli-sha256:
     description: >-
       Expected JAR SHA-256. Verifies a pinned version the distribution manifest
       does not list.
@@ -97,10 +89,6 @@ runs:
   using: node24
   main: dist/main/index.js
   post: dist/post/index.js
-  # Gate the store on job success. By default the post step stores only when the
-  # job succeeded, so a failed build never overwrites the cache. The main step
-  # exports DV_AC_STORE_ON_FAILURE from the cache-store-on-failure input to carry
-  # the opt-in here, because post-if cannot read an action input directly, only
-  # the workflow env context. If the runner ever failed to surface that variable,
-  # this degrades to a plain success() — the safe default still holds.
-  post-if: success() || env.DV_AC_STORE_ON_FAILURE == 'true'
+  # Gate the store on job success: the post step runs only when the job
+  # succeeded, so a failed build never overwrites the cache.
+  post-if: success()
