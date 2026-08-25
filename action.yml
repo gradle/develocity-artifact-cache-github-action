@@ -1,5 +1,5 @@
 name: Develocity Artifact Cache GitHub Action
-description: Restore and store Gradle, Maven, npm, pip, Playwright, and Sonar build dependencies through the Develocity Artifact Cache.
+description: Restore and store Gradle, Maven, npm, pip, and Sonar build dependencies through the Develocity Artifact Cache.
 author: Develocity
 
 # Marketplace listing branding. Matches the gradle/actions house style (color:
@@ -84,11 +84,21 @@ inputs:
       argument per line. The flags controlled by the action — --dv-server,
       --dv-edge, --image-name, and --cache-metrics-file — are rejected here.
     required: false
+  job-status:
+    description: >-
+      Internal — do not set. The job status the post step inspects to decide
+      whether to store. Defaults to the job.status context, which the runner
+      re-evaluates at the time the post step actually runs, so it reflects the
+      final job outcome (a failed build never stores). Overriding this defeats
+      that gate.
+    required: false
+    default: ${{ job.status }}
 
 runs:
   using: node24
   main: dist/main/index.js
   post: dist/post/index.js
-  # Gate the store on job success: the post step runs only when the job
-  # succeeded, so a failed build never overwrites the cache.
-  post-if: success()
+  # The post step always runs so it can write the job summary even on a failed
+  # build (it is the sole summary writer). It gates the store itself on the
+  # job-status input (default: job.status), so a failed build still never stores.
+  post-if: always()

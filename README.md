@@ -1,6 +1,6 @@
 # Develocity Artifact Cache GitHub Action
 
-Cache Gradle, Maven, npm, pip, Playwright, and Sonar dependencies and build outputs in GitHub
+Cache Gradle, Maven, npm, pip, and Sonar dependencies and build outputs in GitHub
 Actions with the [Develocity Artifact Cache](https://docs.develocity.ai/artifact-cache/),
 in a single workflow step. The action restores the cache before your build and stores
 it afterward automatically.
@@ -15,7 +15,7 @@ you:
 - **One step, both phases.** The action restores in its main step and stores in an
   automatic post step. You do not write or order a separate store step, and cache
   activity never fails the build.
-- **Every cache type, autodetected.** It caches Gradle, Maven, npm, pip, Playwright, and Sonar
+- **Every cache type, autodetected.** It caches Gradle, Maven, npm, pip, and Sonar
   content automatically, with no per-type configuration.
 - **Cache images that work out of the box.** Images are generated per job and isolated by
   runner operating system and architecture, with smart fallbacks to the base branch and
@@ -23,8 +23,9 @@ you:
 - **A verified, tested CLI.** The action downloads a checksum-verified CLI JAR and defaults
   to the version pinned and tested for this release, so you do not track CLI versions or
   download URLs yourself.
-- **Visible results.** Every run adds restore and store tables to the job summary, and
-  Gradle and Maven builds surface the same metrics in their Build Scan.
+- **Visible results.** A run's cache activity is summarized as a table in the job summary
+  (whenever the action reaches the cache), and Gradle and Maven builds surface the same
+  metrics in their Build Scan.
 
 Already driving the CLI by hand? See
 [Migrating from a custom setup](#migrating-from-a-custom-artifact-cache-cli-setup).
@@ -163,30 +164,35 @@ the workflow log.
 
 ## Cache coverage and observability
 
-The action caches **Gradle, Maven, npm, pip, Playwright, and Sonar** automatically: it invokes the Artifact Cache
+The action caches **Gradle, Maven, npm, pip, and Sonar** automatically: it invokes the Artifact Cache
 CLI, which autodetects the matching project content on the runner and caches each type it
 finds, with no per-type enable input. To exclude a type (for example, to skip npm in a
 large monorepo), pass `--no-autodetect <type>` through `additional-cli-args`.
 
 Cache activity is visible in two places:
 
-- The **job summary** is the closest observability layer: every run adds restore and store
-  tables to it (see [Job summary](#job-summary) below).
+- The **job summary** is the closest observability layer: a run's cache activity is
+  summarized as a table (see [Job summary](#job-summary) below).
 - For finer-grained cache operation metrics, inspect the build's **Build Scan** in
   Develocity. Gradle and Maven builds that apply the Develocity Gradle plugin or Maven
   extension surface cache metrics there directly.
 
 ### Job summary
 
-After each restore and store, the action adds a cache-activity table to the GitHub **job
-summary**, sourced from the metrics the Artifact Cache CLI writes:
+After a run, the action adds a single cache-activity table to the GitHub **job summary**,
+sourced from the metrics the Artifact Cache CLI writes. The table has a **Phase** column
+and one row per phase:
 
-- **restore**: Restored, Not found, Failed, Size, Duration.
-- **store**: Stored, Already present, Failed, Size, Duration.
+- **Restore**: Restored, Not found, Failed, Size, Duration.
+- **Store**: Stored, Already present, Failed, Size, Duration.
 
-A dash marks a field the CLI did not report. The summary carries cache counts only, not
-a Build Scan link (Gradle and Maven surface the same metrics in the Build Scan through
-the separate path above).
+A successful restore followed by a store shows both rows; when the store is skipped —
+read-only cache, a restore that did not succeed, or a **failed build** — the table shows
+the restore row only. An `Errors` column is added when a phase reports a message, and a
+dash marks a field the CLI did not report. The post step always runs, so the table
+appears even when the build fails (with the restore row only, since a failed build never
+stores). The summary carries cache counts only, not a Build Scan link (Gradle and Maven
+surface the same metrics in the Build Scan through the separate path above).
 
 ### Warnings
 
@@ -282,8 +288,8 @@ JDK (GitHub-hosted runners do; see above):
 | macOS | x64, ARM64 |
 | Windows | x64 |
 
-It also runs on self-hosted Linux (x64) runners. All six cache types (Gradle, Maven,
-npm, pip, Playwright, Sonar) are supported on every listed runner.
+It also runs on self-hosted Linux (x64) runners. All five cache types (Gradle, Maven,
+npm, pip, Sonar) are supported on every listed runner.
 
 ### JVM warmup
 
@@ -313,7 +319,7 @@ Some configuration is handled by the CLI rather than exposed as an action input:
 
 - **Cache cleanup** is automatic, so there is no cleanup input.
 - **Cache-type selection** is by autodetection: the CLI detects Gradle, Maven, npm, pip,
-  Playwright, and Sonar. To exclude a type, pass `--no-autodetect <type>` through
+  and Sonar. To exclude a type, pass `--no-autodetect <type>` through
   `additional-cli-args`.
 - **Tool homes** are resolved from the standard environment variables CI sets. For a
   non-standard Maven local repository, pass `--maven-repository <path>` through
