@@ -11,15 +11,26 @@ branding:
 
 inputs:
   develocity-url:
-    description: Develocity server URL, passed to the AC CLI as --dv-server.
-    required: true
+    description: >-
+      Develocity server URL, passed to the AC CLI as --dv-server. Provide exactly
+      one of develocity-url or develocity-edge-url — they are mutually exclusive.
+    required: false
+  develocity-edge-url:
+    description: >-
+      Develocity Edge URL, passed to the AC CLI as --dv-edge to target an Edge
+      directly instead of a server. Provide exactly one of develocity-url or
+      develocity-edge-url — they are mutually exclusive. Whichever is set also
+      identifies the Develocity host for the access-key lookup and short-lived
+      token exchange.
+    required: false
   develocity-access-key:
     description: >-
-      Develocity access key for the develocity-url host, used to authenticate the
+      Develocity access key for the chosen endpoint host (whichever of
+      develocity-url or develocity-edge-url is set), used to authenticate the
       AC CLI. Provide it in host=key form (e.g. "develocity.example.com=<key>" or
       a ";"-separated host1=key1;host2=key2 list), matching the
       DEVELOCITY_ACCESS_KEY format; a bare key value is not accepted. The action
-      uses the entry for the develocity-url host. This input is the only key
+      uses the entry for that endpoint host. This input is the only key
       source: the action does not read the DEVELOCITY_ACCESS_KEY environment
       variable or keys.properties. The action immediately exchanges this
       long-lived key for a short-lived Develocity token and uses that token only

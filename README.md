@@ -101,8 +101,9 @@ two things matter:
 
 | Input | Required | Default | Description |
 | --- | --- | --- | --- |
-| `develocity-url` | yes | (none) | Develocity server URL. |
-| `develocity-access-key` | yes | (none) | Access key for `develocity-url` in `host=key` form (the only key source). The action exchanges it for a short-lived token used **only** for its own cache restore/store — it is not exported to other steps. Required to enable caching; never fails the build if missing — it warns and skips (see [Authentication](#authentication)). |
+| `develocity-url` | one of¹ | (none) | Develocity server URL, passed to the CLI as `--dv-server`. |
+| `develocity-edge-url` | one of¹ | (none) | Develocity Edge URL, passed to the CLI as `--dv-edge` to target an Edge directly instead of a server. Whichever endpoint is set also identifies the Develocity host for the access-key lookup and short-lived-token exchange. |
+| `develocity-access-key` | yes | (none) | Access key for the chosen endpoint host (`develocity-url` or `develocity-edge-url`) in `host=key` form (the only key source). The action exchanges it for a short-lived token used **only** for its own cache restore/store — it is not exported to other steps. Required to enable caching; never fails the build if missing — it warns and skips (see [Authentication](#authentication)). |
 | `develocity-token-expiry` | no | `2` | Lifetime, in hours, of the short-lived token obtained from `develocity-access-key`. Raise it only if a build could run long enough for the token to expire before the post-step store (see [Authentication](#authentication)). |
 | `image-names` | no | (none) | Ordered image names, one per line: the first is the primary (stored under, tried first on restore), the rest are restore-only fallbacks. Replaces the auto-generated name (see [Cache image names](#cache-image-names)). |
 | `cache-read-only` | no | `false` | When `true`, restore only: the post step skips the store. |
@@ -113,22 +114,24 @@ two things matter:
 | `cli-sha256` | no | (built in) | Expected JAR SHA-256; needed only to verify a version the action does not already ship a checksum for. |
 | `additional-cli-args` | no | (none) | Extra CLI arguments (one per line) appended to restore and store. The action-managed flags (`--dv-server`, `--image-name`, `--cache-metrics-file`, `--dv-edge`) are rejected. |
 
+¹ Provide exactly one of `develocity-url` or `develocity-edge-url` — they are mutually exclusive.
+
 ## Authentication
 
-The action needs a Develocity access key for the server named by `develocity-url`,
-supplied through the **`develocity-access-key` input**. This input is the **only** key
-source: the action does **not** read the `DEVELOCITY_ACCESS_KEY` environment variable or
-`keys.properties`, so it never authenticates with an ambient key you did not explicitly
-pass to it.
+The action needs a Develocity access key for the endpoint it targets — whichever of
+`develocity-url` or `develocity-edge-url` you set — supplied through the
+**`develocity-access-key` input**. This input is the **only** key source: the action does
+**not** read the `DEVELOCITY_ACCESS_KEY` environment variable or `keys.properties`, so it
+never authenticates with an ambient key you did not explicitly pass to it.
 
 Provide it in **`host=key` form** — e.g. `develocity.example.com=<key>`, or a
 `;`-separated `host1=key1;host2=key2` list — matching the `DEVELOCITY_ACCESS_KEY` format
 used across the Develocity ecosystem (the DV build agents, `keys.properties`, and
 `setup-gradle`). A bare key value is not accepted. The action uses the entry for the
-`develocity-url` host, so a key for another host is never sent to this server.
+chosen endpoint host, so a key for another host is never sent to it.
 
 The input is **required** to enable caching, but the action is fail-safe: if it is missing,
-not in `host=key` form, or has no entry for the `develocity-url` host, the action **warns
+not in `host=key` form, or has no entry for the chosen endpoint host, the action **warns
 and skips all cache activity for the job** rather than failing the build.
 
 ### Short-lived access tokens
