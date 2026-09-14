@@ -79,15 +79,17 @@ two things matter:
    build actually uses**. If this action ran first, it would resolve the default Gradle User
    Home, which may not match the one `setup-gradle` goes on to configure — notably on
    Windows, where `setup-gradle` can relocate it.
-2. **Set `cache-disabled: true` on `setup-gradle`.** This action already caches the Gradle
-   dependencies that `setup-gradle`'s own Gradle User Home cache would otherwise store.
-   Disabling `setup-gradle`'s caching defers to this action and avoids both mechanisms
-   caching the same content.
+2. **Disable `setup-gradle`'s own Gradle User Home caching.** This action already caches the
+   Gradle dependencies that `setup-gradle`'s cache would otherwise store; disabling it defers
+   to this action and avoids both mechanisms caching the same content. On `gradle/actions`
+   6.4.0 or newer, set `cache-provider: external`, which keeps the job summary accurate by
+   reporting that caching is handled externally rather than turned off; on older versions, set
+   `cache-disabled: true`.
 
 ```yaml
       - uses: gradle/actions/setup-gradle@v6
         with:
-          cache-disabled: true # defer dependency caching to the Artifact Cache action
+          cache-provider: external # defer dependency caching to the Artifact Cache action
 
       - uses: gradle/develocity-artifact-cache-github-action@v1
         with:
@@ -103,14 +105,14 @@ two things matter:
 | --- | --- | --- | --- |
 | `develocity-url` | one of¹ | (none) | Develocity server URL, passed to the CLI as `--dv-server`. |
 | `develocity-edge-url` | one of¹ | (none) | Develocity Edge URL, passed to the CLI as `--dv-edge` to target an Edge directly instead of a server. Whichever endpoint is set also identifies the Develocity host for the access-key lookup and short-lived-token exchange. |
-| `develocity-access-key` | yes | (none) | Access key for the chosen endpoint host (`develocity-url` or `develocity-edge-url`) in `host=key` form (the only key source). The action exchanges it for a short-lived token used **only** for its own cache restore/store — it is not exported to other steps. Required to enable caching; never fails the build if missing — it warns and skips (see [Authentication](#authentication)). |
+| `develocity-access-key` | yes | (none) | Access key for the chosen endpoint host (`develocity-url` or `develocity-edge-url`) in `host=key` form (the only key source). The action exchanges it for a short-lived token used for its own cache restore/store, and, when the AC CLI is downloaded via the edge route, as the bearer credential for that download — it is not exported to other steps. Required to enable caching; never fails the build if missing — it warns and skips (see [Authentication](#authentication)). |
 | `develocity-token-expiry` | no | `2` | Lifetime, in hours, of the short-lived token obtained from `develocity-access-key`. Raise it only if a build could run long enough for the token to expire before the post-step store (see [Authentication](#authentication)). |
 | `image-names` | no | (none) | Ordered image names, one per line: the first is the primary (stored under, tried first on restore), the rest are restore-only fallbacks. Replaces the auto-generated name (see [Cache image names](#cache-image-names)). |
 | `cache-read-only` | no | `false` | When `true`, restore only: the post step skips the store. |
 | `cli-version` | no | pinned general-availability version | Artifact Cache CLI version to download. Defaults to the tested version the action pins; usually leave unset (see [Versioning](#versioning)). |
-| `cli-repository` | no | public URL | JAR download source. Set to an internal mirror for air-gapped runners. Must be an `https` URL unless `cli-repository-allow-insecure` is set. |
-| `cli-repository-header` | no | (none) | A single `Name: Value` HTTP header for an authenticated mirror. Supply via a secret. |
-| `cli-repository-allow-insecure` | no | `false` | Allow a plain-`http` `cli-repository`. The default rejects `http`; enable only for a trusted internal or GitHub Enterprise mirror without TLS (over `http` the download and any `cli-repository-header` credential are sent in cleartext). |
+| `cli-repository` | no | public URL, or the edge route when an edge-capable Develocity node is detected | JAR download source. Set to an internal mirror for air-gapped runners; an explicit value always wins over the edge route. Must be an `https` URL unless `cli-repository-allow-insecure` is set. |
+| `cli-repository-header` | no | (none) | A single `Name: Value` HTTP header for an authenticated mirror. Supply via a secret. Not sent on the edge route, which authenticates with its own bearer token instead — but still validated, so a malformed value still fails the run. |
+| `cli-repository-allow-insecure` | no | `false` | Allow a plain-`http` `cli-repository`, or, on the edge route, a plain-`http` `develocity-url`. The default rejects `http`; enable only for a trusted internal or GitHub Enterprise mirror without TLS (over `http` the download and any `cli-repository-header` credential, or on the edge route the bearer token, are sent in cleartext). |
 | `cli-sha256` | no | (built in) | Expected JAR SHA-256; needed only to verify a version the action does not already ship a checksum for. |
 | `additional-cli-args` | no | (none) | Extra CLI arguments (one per line) appended to restore and store. The action-managed flags (`--dv-server`, `--image-name`, `--cache-metrics-file`, `--dv-edge`) are rejected. |
 
@@ -138,10 +140,12 @@ and skips all cache activity for the job** rather than failing the build.
 
 Develocity access keys are long-lived, so exposing one to a whole workflow is a risk if it
 leaks. To avoid that, the action immediately exchanges the key you provide for a
-**short-lived Develocity token** and uses that token **only for its own cache restore and
-store** — it hands the token to the Artifact Cache CLI through a private, subprocess-scoped
-environment variable. The long-lived key never leaves this action. If the exchange fails, the
-action warns and skips rather than falling back to the long-lived key.
+**short-lived Develocity token**. It hands the token to the Artifact Cache CLI through a
+private, subprocess-scoped environment variable for cache restore and store, and, when the AC
+CLI is downloaded via the edge route (see `cli-repository` above), sends it as the bearer
+credential on that download request. The token is used only for these action-internal
+purposes — the long-lived key never leaves this action. If the exchange fails, the action
+warns and skips rather than falling back to the long-lived key.
 
 The action does **not** set `DEVELOCITY_ACCESS_KEY` (or the token) for any other step. A cache
 action shouldn't propagate credentials to the rest of the build, and — unlike Gradle, which

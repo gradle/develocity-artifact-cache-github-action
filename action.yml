@@ -33,13 +33,14 @@ inputs:
       uses the entry for that endpoint host. This input is the only key
       source: the action does not read the DEVELOCITY_ACCESS_KEY environment
       variable or keys.properties. The action immediately exchanges this
-      long-lived key for a short-lived Develocity token and uses that token only
-      for its own cache restore/store; it does NOT set DEVELOCITY_ACCESS_KEY for
-      other steps, so neither the long-lived key nor the token is propagated to
-      the rest of the workflow. Steps that publish Build Scans should obtain their
-      own token (e.g. via setup-gradle). Required to enable caching, but the action
-      never fails the build for a missing or unmatched key — it warns and skips all
-      cache activity for the job.
+      long-lived key for a short-lived Develocity token, used for its own cache
+      restore/store and, when the AC CLI is downloaded via the edge route (see
+      cli-repository), as the bearer credential for that download; it does NOT
+      set DEVELOCITY_ACCESS_KEY for other steps, so neither the long-lived key
+      nor the token is propagated to the rest of the workflow. Steps that publish
+      Build Scans should obtain their own token (e.g. via setup-gradle). Required
+      to enable caching, but the action never fails the build for a missing or
+      unmatched key — it warns and skips all cache activity for the job.
     required: true
   develocity-token-expiry:
     description: >-
@@ -66,22 +67,28 @@ inputs:
     required: false
   cli-repository:
     description: >-
-      JAR download source. Defaults to the public Develocity download URL. Set
-      to an internal mirror for air-gapped runners. Must be an https URL unless
+      JAR download source. Defaults to the edge route when an edge-capable
+      Develocity node is detected, otherwise the public Develocity download
+      URL. Set to an internal mirror for air-gapped runners; an explicit value
+      always wins over the edge route. Must be an https URL unless
       cli-repository-allow-insecure is true.
     required: false
   cli-repository-header:
     description: >-
       A single "Name: Value" HTTP header sent on the JAR download, for an
       authenticated mirror. Provide this via a GitHub secret to ensure it is masked in logs. Not forwarded to the CLI.
+      Still validated on the edge route even though it is not sent there: an
+      edge-capable Develocity node authenticates the download with its own
+      bearer token instead, but a malformed value still fails the run.
     required: false
   cli-repository-allow-insecure:
     description: >-
-      Allow downloading the AC CLI from a plain-http cli-repository. Defaults
-      to false, so an http URL is rejected. Only enable for a trusted internal
-      or GitHub Enterprise mirror without TLS: over http the download and any
-      cli-repository-header credential are sent in cleartext, with no server
-      authentication.
+      Allow downloading the AC CLI from a plain-http cli-repository, or, on
+      the edge route, a plain-http develocity-url. Defaults to false, so an
+      http URL is rejected. Only enable for a trusted internal or GitHub
+      Enterprise mirror without TLS: over http the download and any
+      cli-repository-header credential (or, on the edge route, the bearer
+      token) are sent in cleartext, with no server authentication.
     required: false
     default: "false"
   cli-sha256:
