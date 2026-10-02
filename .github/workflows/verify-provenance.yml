@@ -1,0 +1,88 @@
+name: Verify provenance
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+      - 'snapshot'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to verify (for example, v1.2.3 or snapshot)'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-provenance-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Resolve the tag under verification
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: echo "TAG=${INPUT_TAG:-$GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+
+      - name: Verify the DSSE envelope signature
+        run: |
+          PAYLOAD_TYPE=$(jq -r '.payloadType' attestation.dsse.json)
+          PAYLOAD_B64=$(jq -r '.payload' attestation.dsse.json)
+          SIG_B64=$(jq -r '.signatures[0].sig' attestation.dsse.json)
+          [ -n "$PAYLOAD_TYPE" ] && [ "$PAYLOAD_TYPE" != "null" ]
+          [ -n "$PAYLOAD_B64" ] && [ "$PAYLOAD_B64" != "null" ]
+          [ -n "$SIG_B64" ] && [ "$SIG_B64" != "null" ]
+          echo -n "$PAYLOAD_B64" | base64 -d > payload.json
+          PAYLOAD_LEN=$(wc -c < payload.json | tr -d ' ')
+          TYPE_LEN=$(printf '%s' "$PAYLOAD_TYPE" | wc -c | tr -d ' ')
+          printf 'DSSEv1 %s %s %s ' "$TYPE_LEN" "$PAYLOAD_TYPE" "$PAYLOAD_LEN" > pae.bin
+          cat payload.json >> pae.bin
+          echo -n "$SIG_B64" | base64 -d > sig.bin
+          openssl pkeyutl -verify -pubin -inkey .github/keys/dpg-20251201.pem -rawin -in pae.bin -sigfile sig.bin
+
+      - name: Verify the signing keyid
+        run: |
+          ENVELOPE_KEYID=$(jq -r '.signatures[0].keyid' attestation.dsse.json)
+          EXPECTED_KEYID=$(openssl pkey -pubin -in .github/keys/dpg-20251201.pem -outform DER | openssl dgst -sha256 | sed 's/^.* //' | cut -c1-6)
+          [ -n "$ENVELOPE_KEYID" ] && [ "$ENVELOPE_KEYID" != "null" ]
+          [ -n "$EXPECTED_KEYID" ]
+          [ "$EXPECTED_KEYID" = "$ENVELOPE_KEYID" ]
+
+      - name: Verify the subject identity matches this artifact and tag
+        run: |
+          ACTUAL_PURL=$(jq -r '.subject[0].name' payload.json)
+          PURL_NAME=$(echo "$ACTUAL_PURL" | sed -n 's/^pkg:oci\/\([^@]*\)@.*/\1/p')
+          REPO_URL=$(echo "$ACTUAL_PURL" | sed -n 's/.*[?&]repository_url=\([^&]*\).*/\1/p')
+          TAG_QUALIFIER=$(echo "$ACTUAL_PURL" | sed -n 's/.*[?&]tag=\([^&]*\).*/\1/p')
+          [ -n "$TAG" ]
+          [ -n "$PURL_NAME" ]
+          [ -n "$REPO_URL" ]
+          [ -n "$TAG_QUALIFIER" ]
+          [ "$PURL_NAME" = "artifact-cache-action-bundle" ]
+          case "$REPO_URL" in *%2Fartifact-cache-action-bundle|*/artifact-cache-action-bundle) ;; *) exit 1 ;; esac
+          [ "$TAG_QUALIFIER" = "$TAG" ]
+
+      - name: Verify envelope subject digest equals sha256(manifest JSON)
+        run: |
+          SUBJECT_DIGEST=$(jq -r '.subject[0].digest.sha256' payload.json)
+          [ -n "$SUBJECT_DIGEST" ] && [ "$SUBJECT_DIGEST" != "null" ]
+          sha256sum --check <(echo "$SUBJECT_DIGEST  oci-manifest.json")
+
+      - name: Verify manifest layers[0].digest equals sha256(bundle.tar)
+        run: |
+          LAYER_DIGEST=$(jq -r '.layers[0].digest | sub("^sha256:";"")' oci-manifest.json)
+          [ -n "$LAYER_DIGEST" ] && [ "$LAYER_DIGEST" != "null" ]
+          sha256sum --check <(echo "$LAYER_DIGEST  bundle.tar")
