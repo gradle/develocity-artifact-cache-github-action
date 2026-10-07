@@ -29,7 +29,7 @@ reproduced here as those licences require.
 | `content-type` | 2.0.0 | MIT |
 | `json-with-bigint` | 3.5.10 | MIT |
 | `tunnel` | 0.0.6 | MIT |
-| `undici` | 6.27.0 | MIT |
+| `undici` | 6.29.0 | MIT |
 | `universal-user-agent` | 7.0.3 | ISC |
 
 ## @actions/core@3.0.1
@@ -669,7 +669,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-## undici@6.27.0
+## undici@6.29.0
 
 License: MIT
 

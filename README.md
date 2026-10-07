@@ -105,47 +105,156 @@ two things matter:
 | --- | --- | --- | --- |
 | `develocity-url` | one of¹ | (none) | Develocity server URL, passed to the CLI as `--dv-server`. |
 | `develocity-edge-url` | one of¹ | (none) | Develocity Edge URL, passed to the CLI as `--dv-edge` to target an Edge directly instead of a server. Whichever endpoint is set also identifies the Develocity host for the access-key lookup and short-lived-token exchange. |
-| `develocity-access-key` | yes | (none) | Access key for the chosen endpoint host (`develocity-url` or `develocity-edge-url`) in `host=key` form (the only key source). The action exchanges it for a short-lived token used for its own cache restore/store, and, when the AC CLI is downloaded via the edge route, as the bearer credential for that download — it is not exported to other steps. Required to enable caching; never fails the build if missing — it warns and skips (see [Authentication](#authentication)). |
-| `develocity-token-expiry` | no | `2` | Lifetime, in hours, of the short-lived token obtained from `develocity-access-key`. Raise it only if a build could run long enough for the token to expire before the post-step store (see [Authentication](#authentication)). |
+| `develocity-auth` | no | (none) | `workload-identity` always authenticates with a GitHub OIDC token, ignoring `develocity-access-key`. Unset or `access-key` uses `develocity-access-key` when it is set and falls back to workload identity otherwise. Any other value fails the step (see [Authentication](#authentication)). |
+| `develocity-access-key` | no | (none) | Access key for the chosen endpoint host (`develocity-url` or `develocity-edge-url`) in `host=key` form (the only key source). The action exchanges it for a short-lived token used for its own cache restore/store, and, when the AC CLI is downloaded via the edge route, as the bearer credential for that download — it is not exported to other steps. When unset or blank, the action falls back to [workload identity](#workload-identity); if that fails too, it warns and skips. Ignored when `develocity-auth` is `workload-identity` (see [Authentication](#authentication)). |
+| `develocity-oidc-audience` | no | origin of the chosen endpoint | Audience of the GitHub OIDC token the action mints; must match the workload identity rule. Ignored when the action authenticates with `develocity-access-key` (see [Workload identity](#workload-identity)). |
+| `develocity-token-expiry` | no | `2` | Lifetime, in hours, of the short-lived token obtained from the access key or OIDC token. Raise it only if a build could run long enough for the token to expire before the post-step store (see [Authentication](#authentication)). |
 | `image-names` | no | (none) | Ordered image names, one per line: the first is the primary (stored under, tried first on restore), the rest are restore-only fallbacks. Replaces the auto-generated name (see [Cache image names](#cache-image-names)). |
 | `cache-read-only` | no | `false` | When `true`, restore only: the post step skips the store. |
 | `cli-version` | no | pinned general-availability version | Artifact Cache CLI version to download. Defaults to the tested version the action pins; usually leave unset (see [Versioning](#versioning)). |
-| `cli-repository` | no | public URL, or the edge route when an edge-capable Develocity node is detected | JAR download source. Set to an internal mirror for air-gapped runners; an explicit value always wins over the edge route. Must be an `https` URL unless `cli-repository-allow-insecure` is set. |
+| `cli-repository` | no | public URL, or the edge route when an edge-capable Develocity node is detected | JAR download source: the directory holding the JARs (see [Downloading the Artifact Cache CLI](#downloading-the-artifact-cache-cli) for the layout). Set to an internal mirror for air-gapped runners; an explicit value always wins over the edge route (see [Downloading the Artifact Cache CLI](#downloading-the-artifact-cache-cli)). Must be an `https` URL unless `cli-repository-allow-insecure` is set. |
 | `cli-repository-header` | no | (none) | A single `Name: Value` HTTP header for an authenticated mirror. Supply via a secret. Not sent on the edge route, which authenticates with its own bearer token instead — but still validated, so a malformed value still fails the run. |
-| `cli-repository-allow-insecure` | no | `false` | Allow a plain-`http` `cli-repository`, or, on the edge route, a plain-`http` `develocity-url`. The default rejects `http`; enable only for a trusted internal or GitHub Enterprise mirror without TLS (over `http` the download and any `cli-repository-header` credential, or on the edge route the bearer token, are sent in cleartext). |
+| `develocity-url-allow-insecure` | no | `false` | Allow the endpoint (`develocity-url` or `develocity-edge-url`) to be a plain-`http` URL. The default warns and skips before any credential is sent, since over `http` the access key or OIDC token travels in cleartext. Matches the Jenkins plugin's `develocityUrlAllowInsecure` (see [Security](#security)). |
+| `allow-untrusted` | no | `false` | Accept the endpoint's TLS certificate without verifying it, for the token exchange, the CLI download from its Edge node, and the CLI itself (`--allow-untrusted-server`). A `cli-repository` mirror and redirects away from the endpoint are still verified. Matches the Jenkins plugin's `allowUntrusted` (see [Security](#security)). |
+| `cli-repository-allow-insecure` | no | `false` | Allow the CLI download over plain `http`: from a `cli-repository` mirror, or from the Edge node at an `http` endpoint (which also needs `develocity-url-allow-insecure`). The default rejects `http`; enable only for trusted internal CI without TLS (over `http` the download and any `cli-repository-header` credential, or on the edge route the bearer token, are sent in cleartext). |
 | `cli-sha256` | no | (built in) | Expected JAR SHA-256; needed only to verify a version the action does not already ship a checksum for. |
-| `additional-cli-args` | no | (none) | Extra CLI arguments (one per line) appended to restore and store. The action-managed flags (`--dv-server`, `--image-name`, `--cache-metrics-file`, `--dv-edge`) are rejected. |
+| `additional-cli-args` | no | (none) | Extra CLI arguments (one per line) appended to restore and store. The action-managed flags (`--dv-server`, `--image-name`, `--cache-metrics-file`, `--dv-edge`, and `--allow-untrusted-server`, which `allow-untrusted` sets) are rejected. |
 
 ¹ Provide exactly one of `develocity-url` or `develocity-edge-url` — they are mutually exclusive.
 
 ## Authentication
 
-The action needs a Develocity access key for the endpoint it targets — whichever of
-`develocity-url` or `develocity-edge-url` you set — supplied through the
-**`develocity-access-key` input**. This input is the **only** key source: the action does
-**not** read the `DEVELOCITY_ACCESS_KEY` environment variable or `keys.properties`, so it
-never authenticates with an ambient key you did not explicitly pass to it.
+The action authenticates to the endpoint it targets (whichever of `develocity-url` or
+`develocity-edge-url` you set) with one of two credentials: an access key, or a GitHub OIDC
+token the action mints itself ([workload identity](#workload-identity)). Which one it uses
+depends on `develocity-auth` and on whether `develocity-access-key` is set:
 
-Provide it in **`host=key` form** — e.g. `develocity.example.com=<key>`, or a
-`;`-separated `host1=key1;host2=key2` list — matching the `DEVELOCITY_ACCESS_KEY` format
+| `develocity-auth` | `develocity-access-key` | Credential |
+| --- | --- | --- |
+| unset or `access-key` | set | the access key |
+| unset or `access-key` | unset or blank | a GitHub OIDC token (the fallback) |
+| `workload-identity` | either (ignored) | a GitHub OIDC token |
+
+Any other `develocity-auth` value **fails the step**. An access key needs only the secret it
+is stored in. A GitHub OIDC token needs Develocity 2026.3 or later, a workload identity rule,
+`id-token: write` on the job, and `develocity-edge-url`.
+
+Most workflows leave `develocity-auth` unset. Set it to `workload-identity` when a key may
+still reach the action, for example from a shared workflow that passes one to every caller,
+and the job should authenticate with workload identity anyway.
+
+The action logs which credential it used. Outside `develocity-auth: workload-identity`, a key
+that is set is always used, never replaced by an OIDC token, even when it has no entry for the
+endpoint host. If neither credential is available, the action **warns and skips all cache
+activity for the job** rather than failing the build. That includes pull requests from forks,
+which GitHub gives neither secrets nor OIDC tokens.
+
+### Access key
+
+Supply the key through the **`develocity-access-key` input**, the **only**
+key source: the action does **not** read the `DEVELOCITY_ACCESS_KEY` environment variable or
+`keys.properties`, so it never authenticates with an ambient key you did not explicitly pass
+to it.
+
+```yaml
+      - uses: gradle/develocity-artifact-cache-github-action@v1
+        with:
+          develocity-url: https://develocity.example.com
+          develocity-access-key: ${{ secrets.DEVELOCITY_ACCESS_KEY }}
+```
+
+Provide it in **`host=key` form** (e.g. `develocity.example.com=<key>`, or a
+`;`-separated `host1=key1;host2=key2` list), matching the `DEVELOCITY_ACCESS_KEY` format
 used across the Develocity ecosystem (the DV build agents, `keys.properties`, and
 `setup-gradle`). A bare key value is not accepted. The action uses the entry for the
 chosen endpoint host, so a key for another host is never sent to it.
 
-The input is **required** to enable caching, but the action is fail-safe: if it is missing,
-not in `host=key` form, or has no entry for the chosen endpoint host, the action **warns
-and skips all cache activity for the job** rather than failing the build.
+The action is fail-safe: if the key is not in `host=key` form or has no entry for the chosen
+endpoint host, the action **warns and skips all cache activity for the job** rather than
+failing the build.
+
+### Workload identity
+
+Requires Develocity **2026.3 or later**. The action uses workload identity when
+`develocity-auth` is `workload-identity`, or when `develocity-access-key` is not set. Instead
+of a long-lived access key kept in a secret, it mints a short-lived OIDC token from
+[GitHub's OIDC provider](https://docs.github.com/en/actions/concepts/security/openid-connect)
+and exchanges it with Develocity, so there is no access key to store as a GitHub Actions
+secret. Three things have to be in place:
+
+1. **A workload identity rule on the Develocity server** that accepts the token. Develocity
+   validates it against the issuer, audience, and claim requirements on the matching rule,
+   and the rule decides what the token grants. The issuer is
+   `https://token.actions.githubusercontent.com` on GitHub.com, and
+   `https://HOSTNAME/_services/token/actions` on GitHub Enterprise Server. Set the rule's
+   audience to the origin of the URL the action targets, such as
+   `https://develocity.example.com` (see the audience paragraph below). An administrator
+   configures it; see
+   [Workload Identity](https://develocity.ai/help/workload-identity) in the Develocity
+   documentation.
+2. **The `id-token: write` permission on the job.** Without it GitHub offers the job no OIDC
+   token, and the action warns that workload identity failed and skips all cache activity.
+   Declaring `permissions` replaces the defaults, so also list the ones the job already
+   relies on, such as `contents: read` for `actions/checkout`.
+3. **`develocity-edge-url`, not `develocity-url`.** Workload identity currently works only
+   when the action targets an Edge directly. Through `develocity-url` the Artifact Cache CLI
+   discovers its Edge first, and discovery rejects a workload identity token. Develocity
+   2026.1 and later has a built-in Edge, so the Develocity server's own URL works as
+   `develocity-edge-url`, as in the example below.
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # lets the action mint a GitHub OIDC token
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: gradle/develocity-artifact-cache-github-action@v1
+        with:
+          develocity-edge-url: https://develocity.example.com
+          # no develocity-access-key: the action falls back to workload identity
+
+      - run: ./gradlew build
+```
+
+The token's audience defaults to the origin of the chosen endpoint, `develocity-edge-url`
+here (`https://develocity.example.com` above, with no path or trailing slash). A non-default
+port stays in it: `https://develocity.example.com:8443/` gives the audience
+`https://develocity.example.com:8443`. It must match the audience on the workload identity
+rule exactly. If the rule uses a different one, for
+instance because the Edge has its own host while the rule names the server's, set
+`develocity-oidc-audience`:
+
+```yaml
+        with:
+          develocity-edge-url: https://develocity.example.com
+          develocity-oidc-audience: https://github.com/acme
+```
+
+A GitHub OIDC token lasts about five minutes, so the action mints it and exchanges it for a
+Develocity token straight away, in its main step. `develocity-token-expiry` governs how long
+*that* token lives. Size it from the action's step through to the post-step store, not from
+the start of the job.
+
+The action's token is not shared with other steps. If a later step needs Develocity too (for
+example `setup-gradle`, to publish Build Scans), it needs its own credential. Workflows that
+mint an OIDC token for such a step can pass the same token to this action's
+`develocity-access-key`, in `host=token` form.
 
 ### Short-lived access tokens
 
 Develocity access keys are long-lived, so exposing one to a whole workflow is a risk if it
-leaks. To avoid that, the action immediately exchanges the key you provide for a
-**short-lived Develocity token**. It hands the token to the Artifact Cache CLI through a
-private, subprocess-scoped environment variable for cache restore and store, and, when the AC
-CLI is downloaded via the edge route (see `cli-repository` above), sends it as the bearer
-credential on that download request. The token is used only for these action-internal
-purposes — the long-lived key never leaves this action. If the exchange fails, the action
-warns and skips rather than falling back to the long-lived key.
+leaks. To avoid that, the action immediately exchanges its credential (your access key, or
+the OIDC token it minted) for a **short-lived Develocity token**. It hands the token to the
+Artifact Cache CLI through a private, subprocess-scoped environment variable for cache restore
+and store, and, when the AC CLI is downloaded via the edge route (see
+[Downloading the Artifact Cache CLI](#downloading-the-artifact-cache-cli)), sends it as the
+bearer credential on that download request. The token is used only for these action-internal
+purposes — the credential it was exchanged for never leaves this action. If the exchange
+fails, the action warns and skips rather than falling back to that credential.
 
 The action does **not** set `DEVELOCITY_ACCESS_KEY` (or the token) for any other step. A cache
 action shouldn't propagate credentials to the rest of the build, and — unlike Gradle, which
@@ -159,15 +268,73 @@ runs long enough that the token could expire before the post-step store runs.
 
 ## Security
 
-The action authenticates with a Develocity access key, supplied to the Artifact Cache CLI through the
-host-scoped `DEVELOCITY_ACCESS_KEY` environment variable. To limit its exposure:
+Whichever credential the action authenticates with, the access key you supply or the OIDC
+token it mints, is exchanged for a short-lived Develocity token, and only that token reaches
+the Artifact Cache CLI, through the host-scoped `DEVELOCITY_ACCESS_KEY` environment variable.
+The credential itself is never passed to the CLI, and the action does not fall back to it
+when the exchange fails. To limit its exposure:
 
-- supply the key through a repository or organization **secret**, as above, rather than a
-  literal;
-- prefer an access key **scoped to only the servers and permissions** it needs.
+- on the access-key path, supply the key through a repository or organization **secret**, as
+  above, rather than a literal, and prefer an access key **scoped to only the servers and
+  permissions** it needs;
+- on the [workload identity path](#workload-identity) there
+  is no key to store at all: the action mints a short-lived GitHub OIDC token, and the
+  matching workload identity rule on the Develocity server decides what it grants.
 
-The resolved key is registered with the runner as a masked value, so it is redacted from
-the workflow log.
+Even without `develocity-auth: workload-identity`, the action uses workload identity whenever
+`develocity-access-key` is unset or blank and the job grants `id-token: write`. It mints a
+token whose audience is the Develocity endpoint, so the token is of no use anywhere else, and
+it lasts about five minutes. An audience set with `develocity-oidc-audience` is used instead; if it is one that
+other services also accept (GitHub's default, the repository owner URL, for example), the
+token is valid there too. The token only authenticates if a workload identity rule on that
+server matches the repository's claims. A misspelled secret name in such a repository
+therefore authenticates with the rule's permissions rather than failing; the log line naming
+the credential in use shows which one it was.
+
+The action sends a credential only over `https` unless you opt in. An `http` endpoint makes
+the action warn and skip all cache activity before it resolves or mints anything; set
+`develocity-url-allow-insecure: true` only for a trusted internal network without TLS. For an
+endpoint with a self-signed or internal certificate, prefer installing the certificate on the
+runner. `allow-untrusted: true` turns verification off for the endpoint instead, for the token
+exchange, the CLI download from its Edge node, and the CLI. Both inputs match the Jenkins
+plugin's `develocityUrlAllowInsecure` and `allowUntrusted`.
+
+Both the supplied credential and the exchanged token are registered with the runner as masked
+values, so they are redacted from the workflow log.
+
+## Downloading the Artifact Cache CLI
+
+The action downloads the Artifact Cache CLI JAR once, in its main step, and the post step
+reuses it. It takes the JAR from the first of these sources that applies:
+
+1. **`cli-repository`**, when set, sending `cli-repository-header` if you configured one.
+   It names the directory holding the JARs, and the action requests
+   `<cli-repository>/develocity-artifact-cache-cli-<version>.jar`, the same layout as the
+   Jenkins plugin's `cliRepository`, so one mirror serves both.
+2. **The edge route**, when the endpoint you set (`develocity-url` or `develocity-edge-url`)
+   is served by a Develocity Edge node at version **2.3.0 or later**, connected to Develocity
+   2026.3 or later. The action recognizes such a node from the `X-Edge` header on the
+   short-lived-token exchange response, then downloads
+   `<endpoint>/edge/assets/artifact-cache-cli/<version>` with that token as the bearer
+   credential. You host nothing, and an Edge node that already holds the version serves it
+   without the runner reaching the public host. An Edge node older than 2.3.0 is logged and
+   not used.
+3. **The public Develocity download host.**
+
+Checksum verification works the same whichever source provides the JAR: it is checked against
+`cli-sha256`, or else the checksum the action ships for that version. A version with neither
+runs unverified, and the action logs a warning.
+
+The action does not fall back from one source to another: if the chosen source is still
+unreachable after retries, it warns and skips all cache activity for the job. To take the
+Edge node out of the download path, set `cli-repository`.
+
+Before version 1.1.0, the action requested
+`<cli-repository>/develocity-artifact-cache-cli/develocity-artifact-cache-cli-<version>.jar`,
+one directory further down. A mirror laid out that way still works for now: when the current
+layout answers 404, the action retries the old one and warns with the `cli-repository` value
+to set instead. Update the value, because the old layout will stop working in a future
+release.
 
 ## Cache coverage and observability
 
@@ -204,8 +371,9 @@ surface the same metrics in the Build Scan through the separate path above).
 ### Warnings
 
 Cache activity is best-effort: a restore or store problem is surfaced as a **warning**,
-never a build failure. (The one hard failure is a JAR checksum mismatch, a security
-guard; see [Security](#security).) The action warns when an operation reports a problem:
+never a build failure. Only two things fail the step: a JAR checksum mismatch, which is a
+security guard (see [Security](#security)), and an unknown `develocity-auth` value. The
+action warns when an operation reports a problem:
 
 - **Failures**: a non-zero failed-artifacts or failed-images count, or a transient error
   recorded by the CLI, warns that some cache activity did not complete. The build
@@ -213,6 +381,12 @@ guard; see [Security](#security).) The action warns when an operation reports a 
 - **Rejected access key**: when the Develocity server rejects the key (unauthorized), the
   action warns specifically and points at the `develocity-access-key` input; cache
   activity is skipped for that step and the build still runs.
+- **Workload identity problems**: when the action uses workload identity, it warns when the
+  job has no OIDC token to mint (check `permissions: id-token: write`), when Develocity does
+  not accept the token (naming the audience to compare with the workload identity rule), when
+  a restore or store is rejected (check what the rule grants), and when `develocity-url` is
+  set instead of `develocity-edge-url`. Cache activity is skipped where it cannot proceed,
+  and the build still runs.
 
 A cache **miss** is expected: it is not a failure and never warns.
 

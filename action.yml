@@ -23,29 +23,51 @@ inputs:
       identifies the Develocity host for the access-key lookup and short-lived
       token exchange.
     required: false
+  develocity-auth:
+    description: >-
+      Optional. Set to workload-identity to always authenticate with a GitHub
+      OIDC token the action mints, ignoring develocity-access-key even when it
+      is set. Leave unset, or set to access-key, to use develocity-access-key
+      when it is set and fall back to workload identity when it is unset or
+      blank. Any other value fails the step.
+    required: false
   develocity-access-key:
     description: >-
       Develocity access key for the chosen endpoint host (whichever of
-      develocity-url or develocity-edge-url is set), used to authenticate the
-      AC CLI. Provide it in host=key form (e.g. "develocity.example.com=<key>" or
-      a ";"-separated host1=key1;host2=key2 list), matching the
-      DEVELOCITY_ACCESS_KEY format; a bare key value is not accepted. The action
-      uses the entry for that endpoint host. This input is the only key
-      source: the action does not read the DEVELOCITY_ACCESS_KEY environment
-      variable or keys.properties. The action immediately exchanges this
-      long-lived key for a short-lived Develocity token, used for its own cache
-      restore/store and, when the AC CLI is downloaded via the edge route (see
-      cli-repository), as the bearer credential for that download; it does NOT
-      set DEVELOCITY_ACCESS_KEY for other steps, so neither the long-lived key
-      nor the token is propagated to the rest of the workflow. Steps that publish
-      Build Scans should obtain their own token (e.g. via setup-gradle). Required
-      to enable caching, but the action never fails the build for a missing or
-      unmatched key — it warns and skips all cache activity for the job.
-    required: true
+      develocity-url or develocity-edge-url is set). Provide it in host=key form
+      (e.g. "develocity.example.com=<key>" or a ";"-separated
+      host1=key1;host2=key2 list), matching the DEVELOCITY_ACCESS_KEY format; a
+      bare key value is not accepted. The action uses the entry for that
+      endpoint host. This input is the only key source: the action does not read
+      the DEVELOCITY_ACCESS_KEY environment variable or keys.properties. The
+      action immediately exchanges this long-lived key for a short-lived
+      Develocity token, used for its own cache restore/store and, when the AC CLI
+      is downloaded via the edge route (see cli-repository), as the bearer
+      credential for that download; it does NOT set DEVELOCITY_ACCESS_KEY for
+      other steps, so neither the long-lived key nor the token is propagated to
+      the rest of the workflow. Steps that publish Build Scans should obtain
+      their own token (e.g. via setup-gradle). Ignored when develocity-auth is
+      workload-identity. When unset or blank, the action falls back to
+      workload identity: it mints a GitHub OIDC token instead,
+      which needs the id-token: write permission on the job, a workload identity
+      rule on Develocity 2026.3 or later, and develocity-edge-url. If that
+      fallback fails, the action warns and skips all cache activity for the job;
+      it never fails the build for a missing or unmatched key.
+    required: false
+  develocity-oidc-audience:
+    description: >-
+      Audience (aud claim) of the GitHub OIDC token the action mints, when
+      develocity-auth is workload-identity or develocity-access-key is not set.
+      Must match the audience on the Develocity workload identity rule. Defaults
+      to the origin of the chosen endpoint, develocity-edge-url or
+      develocity-url (e.g. https://develocity.example.com). Ignored when the
+      action authenticates with develocity-access-key.
+    required: false
   develocity-token-expiry:
     description: >-
       Lifetime, in hours, of the short-lived Develocity token the action obtains
-      from develocity-access-key for its own cache restore/store. Defaults to 2.
+      from its credential (the access key or the GitHub OIDC token) for its own
+      cache restore/store. Defaults to 2.
       Increase it if a build runs long enough that the token could expire before
       the post-step store runs.
     required: false
@@ -67,11 +89,13 @@ inputs:
     required: false
   cli-repository:
     description: >-
-      JAR download source. Defaults to the edge route when an edge-capable
-      Develocity node is detected, otherwise the public Develocity download
-      URL. Set to an internal mirror for air-gapped runners; an explicit value
-      always wins over the edge route. Must be an https URL unless
-      cli-repository-allow-insecure is true.
+      JAR download source: the directory holding the JARs, which the action
+      requests as <cli-repository>/develocity-artifact-cache-cli-<version>.jar,
+      the same layout as the Jenkins plugin's cliRepository. Defaults to the
+      edge route when an edge-capable Develocity node is detected, otherwise
+      the public Develocity download directory. Set to an internal mirror for
+      air-gapped runners; an explicit value always wins over the edge route.
+      Must be an https URL unless cli-repository-allow-insecure is true.
     required: false
   cli-repository-header:
     description: >-
@@ -81,12 +105,35 @@ inputs:
       edge-capable Develocity node authenticates the download with its own
       bearer token instead, but a malformed value still fails the run.
     required: false
+  develocity-url-allow-insecure:
+    description: >-
+      Allow whichever of develocity-url and develocity-edge-url is set to be a
+      plain-http URL. Defaults to false: an http endpoint warns and skips all
+      cache activity before any credential is sent, because over http the
+      access key or OIDC token, and the short-lived token exchanged for it,
+      travel in cleartext. Matches the Jenkins plugin's
+      develocityUrlAllowInsecure. When the AC CLI also downloads from that
+      endpoint's Edge node, cli-repository-allow-insecure is needed too.
+    required: false
+    default: "false"
+  allow-untrusted:
+    description: >-
+      Accept the Develocity endpoint's TLS certificate without verifying it:
+      for the short-lived token exchange, for the AC CLI download from an Edge
+      node at that endpoint, and for the AC CLI itself
+      (--allow-untrusted-server). A cli-repository mirror, and any redirect
+      away from the endpoint, are still verified. Defaults to false; enable
+      only for a self-signed or internal certificate you cannot install on the
+      runner. Matches the Jenkins plugin's allowUntrusted.
+    required: false
+    default: "false"
   cli-repository-allow-insecure:
     description: >-
-      Allow downloading the AC CLI from a plain-http cli-repository, or, on
-      the edge route, a plain-http develocity-url. Defaults to false, so an
-      http URL is rejected. Only enable for a trusted internal or GitHub
-      Enterprise mirror without TLS: over http the download and any
+      Allow downloading the AC CLI over plain http: from a cli-repository
+      mirror, or from the Edge node at an http develocity-url or
+      develocity-edge-url (which also needs develocity-url-allow-insecure).
+      Defaults to false, so an http URL is rejected. Only enable for
+      trusted internal CI without TLS: over http the download and any
       cli-repository-header credential (or, on the edge route, the bearer
       token) are sent in cleartext, with no server authentication.
     required: false
@@ -100,7 +147,9 @@ inputs:
     description: >-
       Extra arguments appended to every AC CLI restore and store invocation, one
       argument per line. The flags controlled by the action — --dv-server,
-      --dv-edge, --image-name, and --cache-metrics-file — are rejected here.
+      --dv-edge, --image-name, --cache-metrics-file, and
+      --allow-untrusted-server (set allow-untrusted instead) — are rejected
+      here.
     required: false
   job-status:
     description: >-
