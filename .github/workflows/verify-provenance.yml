@@ -72,6 +72,7 @@ jobs:
           case "$PAYLOAD_TYPE" in ''|null) exit 1 ;; esac
           case "$PAYLOAD_B64" in ''|null) exit 1 ;; esac
           case "$SIG_B64" in ''|null) exit 1 ;; esac
+          [ "$PAYLOAD_TYPE" = "application/vnd.in-toto+json" ]
           echo -n "$PAYLOAD_B64" | base64 -d > payload.json
           PAYLOAD_LEN=$(wc -c < payload.json | tr -d ' ')
           TYPE_LEN=$(printf '%s' "$PAYLOAD_TYPE" | wc -c | tr -d ' ')
@@ -79,6 +80,8 @@ jobs:
           cat payload.json >> pae.bin
           echo -n "$SIG_B64" | base64 -d > sig.bin
           openssl pkeyutl -verify -pubin -inkey "$DPG_KEY" -rawin -in pae.bin -sigfile sig.bin
+          [ "$(jq -r '._type' payload.json)" = "https://in-toto.io/Statement/v1" ]
+          [ "$(jq -r '.predicateType' payload.json)" = "https://gradle.com/attestation/publish-repositories/v1" ]
 
       - name: Verify the signing keyid
         run: |
@@ -94,6 +97,8 @@ jobs:
       - name: Verify the subject identity matches this artifact and tag
         run: |
           ACTUAL_PURL=$(jq -r '.subject[0].name' payload.json)
+          [ "$(echo "$ACTUAL_PURL" | grep -o '[?&]repository_url=' | wc -l)" -eq 1 ]
+          [ "$(echo "$ACTUAL_PURL" | grep -o '[?&]tag=' | wc -l)" -eq 1 ]
           PURL_NAME=$(echo "$ACTUAL_PURL" | sed -n 's/^pkg:oci\/\([^@]*\)@.*/\1/p')
           REPO_URL=$(echo "$ACTUAL_PURL" | sed -n 's/.*[?&]repository_url=\([^&]*\).*/\1/p')
           TAG_QUALIFIER=$(echo "$ACTUAL_PURL" | sed -n 's/.*[?&]tag=\([^&]*\).*/\1/p')
@@ -134,6 +139,10 @@ jobs:
           [ -d "$BUNDLE_DIR/dist" ]
           [ -z "$(find "$BUNDLE_DIR" ! -type f ! -type d)" ]
           cmp -- "$BUNDLE_DIR/action.yml" action.yml
-          (cd "$BUNDLE_DIR" && find . -type f -print0) |
-            while IFS= read -r -d '' f; do cmp -- "$BUNDLE_DIR/$f" "$f"; done
+          COMPARED=0
+          while IFS= read -r -d '' f; do
+            cmp -- "$BUNDLE_DIR/$f" "$f"
+            COMPARED=$((COMPARED + 1))
+          done < <(cd "$BUNDLE_DIR" && find . -type f -print0)
+          [ "$COMPARED" -gt 0 ]
           diff -r "$BUNDLE_DIR/dist" dist
