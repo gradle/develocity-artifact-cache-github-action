@@ -86,3 +86,13 @@ jobs:
           LAYER_DIGEST=$(jq -r '.layers[0].digest | sub("^sha256:";"")' oci-manifest.json)
           [ -n "$LAYER_DIGEST" ] && [ "$LAYER_DIGEST" != "null" ]
           sha256sum --check <(echo "$LAYER_DIGEST  bundle.tar")
+
+      - name: Verify the action files equal bundle.tar's contents
+        run: |
+          BUNDLE_DIR="$RUNNER_TEMP/bundle"
+          mkdir -p "$BUNDLE_DIR"
+          tar -xf bundle.tar -C "$BUNDLE_DIR"
+          [ -f "$BUNDLE_DIR/action.yml" ] && [ -d "$BUNDLE_DIR/dist" ]
+          (cd "$BUNDLE_DIR" && find . -type f -print0) |
+            while IFS= read -r -d '' f; do cmp -- "$BUNDLE_DIR/$f" "$f"; done
+          diff -r "$BUNDLE_DIR/dist" dist
