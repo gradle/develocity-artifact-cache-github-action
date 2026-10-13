@@ -69,9 +69,9 @@ jobs:
           PAYLOAD_TYPE=$(jq -r '.payloadType' attestation.dsse.json)
           PAYLOAD_B64=$(jq -r '.payload' attestation.dsse.json)
           SIG_B64=$(jq -r '.signatures[0].sig' attestation.dsse.json)
-          [ -n "$PAYLOAD_TYPE" ] && [ "$PAYLOAD_TYPE" != "null" ]
-          [ -n "$PAYLOAD_B64" ] && [ "$PAYLOAD_B64" != "null" ]
-          [ -n "$SIG_B64" ] && [ "$SIG_B64" != "null" ]
+          case "$PAYLOAD_TYPE" in ''|null) exit 1 ;; esac
+          case "$PAYLOAD_B64" in ''|null) exit 1 ;; esac
+          case "$SIG_B64" in ''|null) exit 1 ;; esac
           echo -n "$PAYLOAD_B64" | base64 -d > payload.json
           PAYLOAD_LEN=$(wc -c < payload.json | tr -d ' ')
           TYPE_LEN=$(printf '%s' "$PAYLOAD_TYPE" | wc -c | tr -d ' ')
@@ -84,7 +84,7 @@ jobs:
         run: |
           ENVELOPE_KEYID=$(jq -r '.signatures[0].keyid' attestation.dsse.json)
           EXPECTED_KEYID=$(echo "$DPG_KEY_SHA256" | cut -c1-6)
-          [ -n "$ENVELOPE_KEYID" ] && [ "$ENVELOPE_KEYID" != "null" ]
+          case "$ENVELOPE_KEYID" in ''|null) exit 1 ;; esac
           [ "$EXPECTED_KEYID" = "$ENVELOPE_KEYID" ]
 
       # The repository is accepted with and without the registry's develocity/ namespace:
@@ -116,13 +116,13 @@ jobs:
       - name: Verify envelope subject digest equals sha256(manifest JSON)
         run: |
           SUBJECT_DIGEST=$(jq -r '.subject[0].digest.sha256' payload.json)
-          [ -n "$SUBJECT_DIGEST" ] && [ "$SUBJECT_DIGEST" != "null" ]
+          case "$SUBJECT_DIGEST" in ''|null) exit 1 ;; esac
           sha256sum --check <(echo "$SUBJECT_DIGEST  oci-manifest.json")
 
       - name: Verify manifest layers[0].digest equals sha256(bundle.tar)
         run: |
           LAYER_DIGEST=$(jq -r '.layers[0].digest | sub("^sha256:";"")' oci-manifest.json)
-          [ -n "$LAYER_DIGEST" ] && [ "$LAYER_DIGEST" != "null" ]
+          case "$LAYER_DIGEST" in ''|null) exit 1 ;; esac
           sha256sum --check <(echo "$LAYER_DIGEST  bundle.tar")
 
       - name: Verify the action files equal bundle.tar's contents
@@ -130,7 +130,10 @@ jobs:
           BUNDLE_DIR="$RUNNER_TEMP/bundle"
           mkdir -p "$BUNDLE_DIR"
           tar -xf bundle.tar -C "$BUNDLE_DIR"
-          [ -f "$BUNDLE_DIR/action.yml" ] && [ -d "$BUNDLE_DIR/dist" ]
+          [ -f "$BUNDLE_DIR/action.yml" ]
+          [ -d "$BUNDLE_DIR/dist" ]
+          [ -z "$(find "$BUNDLE_DIR" ! -type f ! -type d)" ]
+          cmp -- "$BUNDLE_DIR/action.yml" action.yml
           (cd "$BUNDLE_DIR" && find . -type f -print0) |
             while IFS= read -r -d '' f; do cmp -- "$BUNDLE_DIR/$f" "$f"; done
           diff -r "$BUNDLE_DIR/dist" dist
