@@ -1,0 +1,20 @@
+name: Provenance tag pushed
+
+# Signals a tag push to verify-provenance.yml. A tag-push run executes the workflow file
+# stored in the pushed tag, so it cannot verify that tag itself; verify-provenance.yml runs
+# on workflow_run, which always executes the default branch's definition.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+      - 'snapshot'
+
+permissions: {}
+
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: 'true'

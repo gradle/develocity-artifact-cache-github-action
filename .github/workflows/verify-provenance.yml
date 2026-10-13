@@ -1,10 +1,13 @@
 name: Verify provenance
 
+# Runs the default branch's definition: workflow_run and a dispatch from the default branch
+# never execute workflow files from the tag under verification. The tag is checked out into
+# candidate/ and the DPG public key is read from the default branch, pinned by fingerprint.
+
 on:
-  push:
-    tags:
-      - 'v*.*.*'
-      - 'snapshot'
+  workflow_run:
+    workflows: ['Provenance tag pushed']
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -15,27 +18,51 @@ permissions:
   contents: read
 
 concurrency:
-  group: verify-provenance-${{ inputs.tag || github.ref_name }}
+  group: verify-provenance-${{ inputs.tag || github.event.workflow_run.head_branch }}
   cancel-in-progress: true
 
 defaults:
   run:
     shell: bash
+    working-directory: candidate
+
+env:
+  DPG_KEY: ${{ github.workspace }}/trusted/.github/keys/dpg-20251201.pem
+  DPG_KEY_SHA256: 6bce0a45a2caeef7bd185bcb887a4f469279da97b9254e34a5b8e9e349498041
+  BUNDLE_REGISTRY: 544741663861.dkr.ecr.eu-central-1.amazonaws.com
 
 jobs:
   verify:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.event == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Resolve the tag under verification
-        env:
-          INPUT_TAG: ${{ inputs.tag }}
-        run: echo "TAG=${INPUT_TAG:-$GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: trusted
+          sparse-checkout: .github/keys
+          persist-credentials: false
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
+          ref: ${{ github.event.workflow_run.head_sha || inputs.tag }}
+          path: candidate
           persist-credentials: false
+
+      - name: Resolve the tag under verification
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          TAG="${INPUT_TAG:-$RUN_TAG}"
+          [[ "$TAG" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.-]*|snapshot)$ ]]
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Verify the DPG public key's fingerprint
+        run: |
+          ACTUAL_KEY_SHA256=$(openssl pkey -pubin -in "$DPG_KEY" -outform DER | openssl dgst -sha256 | sed 's/^.* //')
+          [ "$ACTUAL_KEY_SHA256" = "$DPG_KEY_SHA256" ]
 
       - name: Verify the DSSE envelope signature
         run: |
@@ -51,16 +78,19 @@ jobs:
           printf 'DSSEv1 %s %s %s ' "$TYPE_LEN" "$PAYLOAD_TYPE" "$PAYLOAD_LEN" > pae.bin
           cat payload.json >> pae.bin
           echo -n "$SIG_B64" | base64 -d > sig.bin
-          openssl pkeyutl -verify -pubin -inkey .github/keys/dpg-20251201.pem -rawin -in pae.bin -sigfile sig.bin
+          openssl pkeyutl -verify -pubin -inkey "$DPG_KEY" -rawin -in pae.bin -sigfile sig.bin
 
       - name: Verify the signing keyid
         run: |
           ENVELOPE_KEYID=$(jq -r '.signatures[0].keyid' attestation.dsse.json)
-          EXPECTED_KEYID=$(openssl pkey -pubin -in .github/keys/dpg-20251201.pem -outform DER | openssl dgst -sha256 | sed 's/^.* //' | cut -c1-6)
+          EXPECTED_KEYID=$(echo "$DPG_KEY_SHA256" | cut -c1-6)
           [ -n "$ENVELOPE_KEYID" ] && [ "$ENVELOPE_KEYID" != "null" ]
-          [ -n "$EXPECTED_KEYID" ]
           [ "$EXPECTED_KEYID" = "$ENVELOPE_KEYID" ]
 
+      # The repository is accepted with and without the registry's develocity/ namespace:
+      # the publisher omits the namespace from the purl today.
+      # A snapshot's OCI tag is snapshot-<first 12 hex of sha256(bundle.tar)>, while its git
+      # tag is the moving snapshot tag.
       - name: Verify the subject identity matches this artifact and tag
         run: |
           ACTUAL_PURL=$(jq -r '.subject[0].name' payload.json)
@@ -72,8 +102,16 @@ jobs:
           [ -n "$REPO_URL" ]
           [ -n "$TAG_QUALIFIER" ]
           [ "$PURL_NAME" = "artifact-cache-action-bundle" ]
-          case "$REPO_URL" in *%2Fartifact-cache-action-bundle|*/artifact-cache-action-bundle) ;; *) exit 1 ;; esac
-          [ "$TAG_QUALIFIER" = "$TAG" ]
+          case "$REPO_URL" in
+            "$BUNDLE_REGISTRY%2Fartifact-cache-action-bundle"|"$BUNDLE_REGISTRY%2Fdevelocity%2Fartifact-cache-action-bundle") ;;
+            *) exit 1 ;;
+          esac
+          if [ "$TAG" = "snapshot" ]; then
+            BUNDLE_SHA256=$(sha256sum bundle.tar | cut -d' ' -f1)
+            [ "$TAG_QUALIFIER" = "snapshot-${BUNDLE_SHA256:0:12}" ]
+          else
+            [ "$TAG_QUALIFIER" = "$TAG" ]
+          fi
 
       - name: Verify envelope subject digest equals sha256(manifest JSON)
         run: |
