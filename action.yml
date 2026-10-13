@@ -67,9 +67,8 @@ inputs:
     description: >-
       Lifetime, in hours, of the short-lived Develocity token the action obtains
       from its credential (the access key or the GitHub OIDC token) for its own
-      cache restore/store. Defaults to 2.
-      Increase it if a build runs long enough that the token could expire before
-      the post-step store runs.
+      cache restore/store. Defaults to 2. The main and post steps each obtain
+      their own token, so it only has to cover one cache operation.
     required: false
     default: "2"
   image-names:
@@ -101,9 +100,12 @@ inputs:
     description: >-
       A single "Name: Value" HTTP header sent on the JAR download, for an
       authenticated mirror. Provide this via a GitHub secret to ensure it is masked in logs. Not forwarded to the CLI.
-      Still validated on the edge route even though it is not sent there: an
-      edge-capable Develocity node authenticates the download with its own
-      bearer token instead, but a malformed value still fails the run.
+      The action sends it only to an explicit cli-repository. When cli-repository is unset,
+      the download takes the edge route or the public default location, and
+      neither receives the header. The action warns that it dropped the header. It
+      validates the value on every route, so a malformed value still fails
+      the step. An edge-capable Develocity node authenticates the download with
+      its own bearer token instead of the header.
     required: false
   develocity-url-allow-insecure:
     description: >-
@@ -140,8 +142,9 @@ inputs:
     default: "false"
   cli-sha256:
     description: >-
-      Expected JAR SHA-256. Verifies a pinned version the distribution manifest
-      does not list.
+      Expected JAR SHA-256. Required when cli-version pins a version the
+      distribution manifest does not list: the action never runs an unverified
+      JAR, so without it that version is refused and caching is skipped.
     required: false
   additional-cli-args:
     description: >-
@@ -149,7 +152,7 @@ inputs:
       argument per line. The flags controlled by the action — --dv-server,
       --dv-edge, --image-name, --cache-metrics-file, and
       --allow-untrusted-server (set allow-untrusted instead) — are rejected
-      here.
+      and fail the step.
     required: false
   job-status:
     description: >-

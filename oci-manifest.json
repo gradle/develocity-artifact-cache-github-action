@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "artifactType": "application/vnd.gradle.develocity.artifact-cache-action",
+  "config": {
+    "mediaType": "application/vnd.gradle.develocity.artifact-cache-action.config.v1+json",
+    "digest": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "size": 2
+  },
+  "layers": [
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar",
+      "digest": "sha256:ff13ac579ae7341443347bbc6797eea82eb2b08ff9c6cdce058d9c571aced3c0",
+      "size": 1321984
+    }
+  ],
+  "annotations": {
+    "org.opencontainers.image.created": "1980-01-01T00:00:00Z"
+  }
+}

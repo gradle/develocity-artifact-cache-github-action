@@ -13,8 +13,8 @@ tooling in GitHub Actions: a single step you add to a job, in the same shape as
 you:
 
 - **One step, both phases.** The action restores in its main step and stores in an
-  automatic post step. You do not write or order a separate store step, and cache
-  activity never fails the build.
+  automatic post step. You do not write or order a separate store step, and a cache
+  problem never fails the build (see [Warnings](#warnings) for what does).
 - **Every cache type, autodetected.** It caches Gradle, Maven, npm, pip, and Sonar
   content automatically, with no per-type configuration.
 - **Cache images that work out of the box.** Images are generated per job and isolated by
@@ -63,8 +63,8 @@ jobs:
 ```
 
 Place the action **before** your build so the restore happens first. The store then runs
-only when the **job succeeds** (it is skipped if a job step failed) and **never fails the
-build**. To make the cache **read-only** (restore, but never store), set
+only when the **job succeeds** (it is skipped if a job step failed), and a cache problem
+**never fails the build**. To make the cache **read-only** (restore, but never store), set
 `cache-read-only: true`.
 
 ### Using with `setup-gradle`
@@ -108,16 +108,16 @@ two things matter:
 | `develocity-auth` | no | (none) | `workload-identity` always authenticates with a GitHub OIDC token, ignoring `develocity-access-key`. Unset or `access-key` uses `develocity-access-key` when it is set and falls back to workload identity otherwise. Any other value fails the step (see [Authentication](#authentication)). |
 | `develocity-access-key` | no | (none) | Access key for the chosen endpoint host (`develocity-url` or `develocity-edge-url`) in `host=key` form (the only key source). The action exchanges it for a short-lived token used for its own cache restore/store, and, when the AC CLI is downloaded via the edge route, as the bearer credential for that download — it is not exported to other steps. When unset or blank, the action falls back to [workload identity](#workload-identity); if that fails too, it warns and skips. Ignored when `develocity-auth` is `workload-identity` (see [Authentication](#authentication)). |
 | `develocity-oidc-audience` | no | origin of the chosen endpoint | Audience of the GitHub OIDC token the action mints; must match the workload identity rule. Ignored when the action authenticates with `develocity-access-key` (see [Workload identity](#workload-identity)). |
-| `develocity-token-expiry` | no | `2` | Lifetime, in hours, of the short-lived token obtained from the access key or OIDC token. Raise it only if a build could run long enough for the token to expire before the post-step store (see [Authentication](#authentication)). |
+| `develocity-token-expiry` | no | `2` | Lifetime, in hours, of each short-lived token obtained from the access key or OIDC token. The main and post steps each obtain their own, so it only has to cover one cache operation (see [Authentication](#authentication)). |
 | `image-names` | no | (none) | Ordered image names, one per line: the first is the primary (stored under, tried first on restore), the rest are restore-only fallbacks. Replaces the auto-generated name (see [Cache image names](#cache-image-names)). |
 | `cache-read-only` | no | `false` | When `true`, restore only: the post step skips the store. |
 | `cli-version` | no | pinned general-availability version | Artifact Cache CLI version to download. Defaults to the tested version the action pins; usually leave unset (see [Versioning](#versioning)). |
 | `cli-repository` | no | public URL, or the edge route when an edge-capable Develocity node is detected | JAR download source: the directory holding the JARs (see [Downloading the Artifact Cache CLI](#downloading-the-artifact-cache-cli) for the layout). Set to an internal mirror for air-gapped runners; an explicit value always wins over the edge route (see [Downloading the Artifact Cache CLI](#downloading-the-artifact-cache-cli)). Must be an `https` URL unless `cli-repository-allow-insecure` is set. |
-| `cli-repository-header` | no | (none) | A single `Name: Value` HTTP header for an authenticated mirror. Supply via a secret. Not sent on the edge route, which authenticates with its own bearer token instead — but still validated, so a malformed value still fails the run. |
+| `cli-repository-header` | no | (none) | A single `Name: Value` HTTP header for an authenticated mirror. Supply via a secret. The action sends it only to an explicit `cli-repository`. When `cli-repository` is unset, the action sends it neither to the public default download location nor on the edge route. The edge route authenticates with its own bearer token. The action warns that it dropped the header. A malformed value still fails the step. |
 | `develocity-url-allow-insecure` | no | `false` | Allow the endpoint (`develocity-url` or `develocity-edge-url`) to be a plain-`http` URL. The default warns and skips before any credential is sent, since over `http` the access key or OIDC token travels in cleartext. Matches the Jenkins plugin's `develocityUrlAllowInsecure` (see [Security](#security)). |
 | `allow-untrusted` | no | `false` | Accept the endpoint's TLS certificate without verifying it, for the token exchange, the CLI download from its Edge node, and the CLI itself (`--allow-untrusted-server`). A `cli-repository` mirror and redirects away from the endpoint are still verified. Matches the Jenkins plugin's `allowUntrusted` (see [Security](#security)). |
 | `cli-repository-allow-insecure` | no | `false` | Allow the CLI download over plain `http`: from a `cli-repository` mirror, or from the Edge node at an `http` endpoint (which also needs `develocity-url-allow-insecure`). The default rejects `http`; enable only for trusted internal CI without TLS (over `http` the download and any `cli-repository-header` credential, or on the edge route the bearer token, are sent in cleartext). |
-| `cli-sha256` | no | (built in) | Expected JAR SHA-256; needed only to verify a version the action does not already ship a checksum for. |
+| `cli-sha256` | no | (built in) | Expected JAR SHA-256. Required when `cli-version` pins a version the action does not ship a checksum for; without it, the action refuses that version and skips caching. |
 | `additional-cli-args` | no | (none) | Extra CLI arguments (one per line) appended to restore and store. The action-managed flags (`--dv-server`, `--image-name`, `--cache-metrics-file`, `--dv-edge`, and `--allow-untrusted-server`, which `allow-untrusted` sets) are rejected. |
 
 ¹ Provide exactly one of `develocity-url` or `develocity-edge-url` — they are mutually exclusive.
@@ -235,9 +235,9 @@ instance because the Edge has its own host while the rule names the server's, se
 ```
 
 A GitHub OIDC token lasts about five minutes, so the action mints it and exchanges it for a
-Develocity token straight away, in its main step. `develocity-token-expiry` governs how long
-*that* token lives. Size it from the action's step through to the post-step store, not from
-the start of the job.
+Develocity token straight away, in the step that uses it: the main step for the restore,
+and the post step mints a new one for the store. `develocity-token-expiry` governs how long
+each Develocity token lives.
 
 The action's token is not shared with other steps. If a later step needs Develocity too (for
 example `setup-gradle`, to publish Build Scans), it needs its own credential. Workflows that
@@ -263,8 +263,9 @@ needs to authenticate with Develocity (for example, to publish a Build Scan), gi
 credentials: `setup-gradle`, for instance, performs the same key-to-short-lived-token exchange
 and exports it for Gradle builds.
 
-The token is valid for **2 hours** by default; raise `develocity-token-expiry` only if a build
-runs long enough that the token could expire before the post-step store runs.
+The token is not kept between steps. The post step exchanges the credential again for the
+store, so no token is saved in the job's state and none outlives the step that uses it. Each
+token is valid for **2 hours** by default, which `develocity-token-expiry` changes.
 
 ## Security
 
@@ -307,7 +308,7 @@ values, so they are redacted from the workflow log.
 The action downloads the Artifact Cache CLI JAR once, in its main step, and the post step
 reuses it. It takes the JAR from the first of these sources that applies:
 
-1. **`cli-repository`**, when set, sending `cli-repository-header` if you configured one.
+1. **`cli-repository`**, when set, sending `cli-repository-header` if you configured one. The action sends the header to none of the sources below, which apply only when `cli-repository` is unset.
    It names the directory holding the JARs, and the action requests
    `<cli-repository>/develocity-artifact-cache-cli-<version>.jar`, the same layout as the
    Jenkins plugin's `cliRepository`, so one mirror serves both.
@@ -322,12 +323,16 @@ reuses it. It takes the JAR from the first of these sources that applies:
 3. **The public Develocity download host.**
 
 Checksum verification works the same whichever source provides the JAR: it is checked against
-`cli-sha256`, or else the checksum the action ships for that version. A version with neither
-runs unverified, and the action logs a warning.
+`cli-sha256`, or else the checksum the action ships for that version. The action never runs
+an unverified JAR. A pinned `cli-version` with neither is refused before anything is
+downloaded, and the action warns and skips all cache activity for the job.
 
-The action does not fall back from one source to another: if the chosen source is still
-unreachable after retries, it warns and skips all cache activity for the job. To take the
-Edge node out of the download path, set `cli-repository`.
+A download that fails on a network error, or with an HTTP 408, 429, or 5xx response, is
+retried up to four attempts in all, waiting 1, 2, then 4 seconds between them. Any other
+response is not retried, and neither is a failure to write the JAR on the runner. The action
+does not fall back from one of the three sources above to another: if the chosen source is
+still unreachable after retries, it warns and skips all cache activity for the job. To take
+the Edge node out of the download path, set `cli-repository`.
 
 Before version 1.1.0, the action requested
 `<cli-repository>/develocity-artifact-cache-cli/develocity-artifact-cache-cli-<version>.jar`,
@@ -354,26 +359,42 @@ Cache activity is visible in two places:
 ### Job summary
 
 After a run, the action adds a single cache-activity table to the GitHub **job summary**,
-sourced from the metrics the Artifact Cache CLI writes. The table has a **Phase** column
-and one row per phase:
+sourced from the metrics the Artifact Cache CLI writes. The table has one row per phase,
+**Restore** then **Store**, with Outcome, Detected tools, Entries, Entry size, and Duration
+columns.
 
-- **Restore**: Restored, Not found, Failed, Size, Duration.
-- **Store**: Stored, Already present, Failed, Size, Duration.
-
-A successful restore followed by a store shows both rows; when the store is skipped —
-read-only cache, a restore that did not succeed, or a **failed build** — the table shows
-the restore row only. An `Errors` column is added when a phase reports a message, and a
-dash marks a field the CLI did not report. The post step always runs, so the table
-appears even when the build fails (with the restore row only, since a failed build never
-stores). The summary carries cache counts only, not a Build Scan link (Gradle and Maven
+Each row starts with an outcome: **Success**, **Warning** when the phase completed but some
+entries failed or the CLI reported no metrics, or **Failure** when the CLI reported an error
+or whole images failed.
+A phase that was meant to run but did not still gets a row, marked **Warning**, with the
+reason in a `Notes` column: for example a store after a **failed build**, or both phases
+when the action skipped all cache activity. In a dry run (`--dry-run` in
+`additional-cli-args`) the CLI writes no metrics, so each phase shows Success with a note
+saying so. The store runs whatever the restore's outcome,
+since storing is how a cache recovers from a failed restore. A read-only cache never meant
+to store, so it shows the restore row only. A dash marks a field the CLI did not report. The
+post step always runs, so the table appears even when the build fails. The summary carries cache counts only, not a Build Scan link (Gradle and Maven
 surface the same metrics in the Build Scan through the separate path above).
 
 ### Warnings
 
 Cache activity is best-effort: a restore or store problem is surfaced as a **warning**,
-never a build failure. Only two things fail the step: a JAR checksum mismatch, which is a
-security guard (see [Security](#security)), and an unknown `develocity-auth` value. The
-action warns when an operation reports a problem:
+never a build failure. The step fails only on a JAR checksum mismatch, which is a security
+guard (see [Security](#security)), or on a configuration mistake that only the workflow
+author can fix, so that it does not hide behind a green run that never caches:
+
+- neither or both of `develocity-url` and `develocity-edge-url`, or an endpoint that is not
+  a valid `http` or `https` URL;
+- an unknown `develocity-auth` value, or a value other than `true` or `false` for
+  `cache-read-only`, `develocity-url-allow-insecure`, `cli-repository-allow-insecure`, or
+  `allow-untrusted`;
+- a malformed `cli-version`, `cli-repository`, `cli-repository-header`, or `cli-sha256`;
+- an action-managed flag in `additional-cli-args`.
+
+Problems with the runner or the network, such as a missing JDK, an unreachable download, or
+a refused credential, warn and skip instead. So does an `http` endpoint or `cli-repository`
+without its opt-in, which the action refuses to send a credential to. The action warns when
+an operation reports a problem:
 
 - **Failures**: a non-zero failed-artifacts or failed-images count, or a transient error
   recorded by the CLI, warns that some cache activity did not complete. The build
@@ -409,6 +430,12 @@ cache of its own can still restore from a related branch:
   starting cold.
 
 **Store** always writes to the single primary name.
+
+Both phases receive the build's branch, in `DEVELOCITY_ARTIFACT_CACHE_BRANCH_NAME`, and the
+branch to fall back to, in `DEVELOCITY_ARTIFACT_CACHE_BASE_BRANCH_NAME`, as
+`refs/heads/<branch>`: a pull request's target branch, or the default branch on a push or a
+manual dispatch. A value you set for either in the job's environment wins over the
+action's, even an empty one.
 
 ### Overriding with `image-names`
 
@@ -491,8 +518,9 @@ CLI release. Two consequences for consumers:
   action skip caching (it never fails the build), so a new major version signals a
   JDK-floor change you must accommodate.
 
-To pin or override, set `cli-version` (and `cli-sha256` to verify a version the
-action does not already ship a checksum for).
+To pin or override, set `cli-version`. A version the action does not already ship a
+checksum for also needs `cli-sha256`; without it the action refuses the version and skips
+caching.
 
 ## Configuration handled by the CLI
 
