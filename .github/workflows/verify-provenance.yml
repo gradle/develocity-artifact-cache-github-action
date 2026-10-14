@@ -1,8 +1,10 @@
 name: Verify provenance
 
-# Runs the default branch's definition: workflow_run and a dispatch from the default branch
-# never execute workflow files from the tag under verification. The tag is checked out into
-# candidate/ and the DPG public key is read from the default branch, pinned by fingerprint.
+# Runs the default branch's definition: workflow_run, schedule, and a dispatch from the default
+# branch never execute workflow files from the tag under verification. Each tag is checked out
+# into candidate/ and the DPG public keys are read from the default branch, pinned by fingerprint.
+# A tag whose own tree drops provenance-tag-pushed.yml starts no workflow_run, so the daily
+# schedule re-verifies every tag that matches the release pattern.
 
 on:
   workflow_run:
@@ -13,56 +15,98 @@ on:
       tag:
         description: 'Tag to verify (for example, v1.2.3 or snapshot)'
         required: true
+  schedule:
+    - cron: '17 4 * * *'
 
 permissions:
   contents: read
 
-concurrency:
-  group: verify-provenance-${{ inputs.tag || github.event.workflow_run.head_branch }}
-  cancel-in-progress: true
-
 defaults:
   run:
     shell: bash
-    working-directory: candidate
 
 env:
-  DPG_KEY: ${{ github.workspace }}/trusted/.github/keys/dpg-20251201.pem
-  DPG_KEY_SHA256: 6bce0a45a2caeef7bd185bcb887a4f469279da97b9254e34a5b8e9e349498041
+  # Every accepted DPG key's SHA-256 DER fingerprint. On a key rotation, add the new key's
+  # fingerprint and its PEM under .github/keys/, and keep the old ones so older tags still verify.
+  DPG_KEY_SHA256S: >-
+    6bce0a45a2caeef7bd185bcb887a4f469279da97b9254e34a5b8e9e349498041
   BUNDLE_REGISTRY: 544741663861.dkr.ecr.eu-central-1.amazonaws.com
+  # Tags published before provenance existed; the schedule skips them.
+  UNATTESTED_TAGS: >-
+    v0.0.1 v0.0.2 v0.0.3 v0.0.4 v0.0.5 v0.0.5-rc-1 v0.0.5-rc-2 v0.0.5-rc-3 v0.0.5-rc-4
+    v1.0.0 v1.0.1-rc-1 v1.0.1-rc-2 v1.0.1-rc-3 v1.1.0-rc-1
 
 jobs:
-  verify:
+  tags:
     if: github.event_name != 'workflow_run' || github.event.workflow_run.event == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tags: ${{ steps.resolve.outputs.tags }}
+    steps:
+      - name: Resolve the tags under verification
+        id: resolve
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+        run: |
+          TAG_PATTERN='^(v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.-]*|snapshot)$'
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            ALL_TAGS=$(git ls-remote --tags --refs "$REPO_URL" | sed 's|^.*refs/tags/||')
+            TAGS=$(echo "$ALL_TAGS" | grep -E "$TAG_PATTERN" | grep -vxF -f <(tr -s ' ' '\n' <<< "$UNATTESTED_TAGS") || true)
+          else
+            TAGS="${INPUT_TAG:-$RUN_TAG}"
+            [[ "$TAGS" =~ $TAG_PATTERN ]]
+          fi
+          [ -n "$TAGS" ]
+          echo "tags=$(echo "$TAGS" | jq -Rnc '[inputs]')" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: tags
+    runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ${{ fromJSON(needs.tags.outputs.tags) }}
+    concurrency:
+      group: verify-provenance-${{ matrix.tag }}
+      cancel-in-progress: true
+    defaults:
+      run:
+        working-directory: candidate
+    env:
+      TAG: ${{ matrix.tag }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.event.repository.default_branch || github.ref }}
           path: trusted
           sparse-checkout: .github/keys
           persist-credentials: false
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ github.event.workflow_run.head_sha || inputs.tag }}
+          ref: ${{ github.event.workflow_run.head_sha || format('refs/tags/{0}', matrix.tag) }}
           path: candidate
           persist-credentials: false
 
-      - name: Resolve the tag under verification
-        env:
-          INPUT_TAG: ${{ inputs.tag }}
-          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+      - name: Select the pinned DPG public key the envelope names
         run: |
-          TAG="${INPUT_TAG:-$RUN_TAG}"
-          [[ "$TAG" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.-]*|snapshot)$ ]]
-          echo "TAG=$TAG" >> "$GITHUB_ENV"
-
-      - name: Verify the DPG public key's fingerprint
-        run: |
-          ACTUAL_KEY_SHA256=$(openssl pkey -pubin -in "$DPG_KEY" -outform DER | openssl dgst -sha256 | sed 's/^.* //')
-          [ "$ACTUAL_KEY_SHA256" = "$DPG_KEY_SHA256" ]
+          ENVELOPE_KEYID=$(jq -r '.signatures[0].keyid' attestation.dsse.json)
+          case "$ENVELOPE_KEYID" in ''|null) exit 1 ;; esac
+          DPG_KEY=
+          for KEY_FILE in "$GITHUB_WORKSPACE"/trusted/.github/keys/*.pem; do
+            KEY_SHA256=$(openssl pkey -pubin -in "$KEY_FILE" -outform DER | openssl dgst -sha256 | sed 's/^.* //')
+            for PINNED_SHA256 in $DPG_KEY_SHA256S; do
+              if [ "$KEY_SHA256" = "$PINNED_SHA256" ] && [ "${PINNED_SHA256:0:6}" = "$ENVELOPE_KEYID" ]; then
+                DPG_KEY=$KEY_FILE
+              fi
+            done
+          done
+          [ -n "$DPG_KEY" ]
+          echo "DPG_KEY=$DPG_KEY" >> "$GITHUB_ENV"
 
       - name: Verify the DSSE envelope signature
         run: |
@@ -73,30 +117,22 @@ jobs:
           case "$PAYLOAD_B64" in ''|null) exit 1 ;; esac
           case "$SIG_B64" in ''|null) exit 1 ;; esac
           [ "$PAYLOAD_TYPE" = "application/vnd.in-toto+json" ]
-          echo -n "$PAYLOAD_B64" | base64 -d > payload.json
-          PAYLOAD_LEN=$(wc -c < payload.json | tr -d ' ')
+          echo -n "$PAYLOAD_B64" | base64 -d > "$RUNNER_TEMP/payload.json"
+          PAYLOAD_LEN=$(wc -c < "$RUNNER_TEMP/payload.json" | tr -d ' ')
           TYPE_LEN=$(printf '%s' "$PAYLOAD_TYPE" | wc -c | tr -d ' ')
-          printf 'DSSEv1 %s %s %s ' "$TYPE_LEN" "$PAYLOAD_TYPE" "$PAYLOAD_LEN" > pae.bin
-          cat payload.json >> pae.bin
-          echo -n "$SIG_B64" | base64 -d > sig.bin
-          openssl pkeyutl -verify -pubin -inkey "$DPG_KEY" -rawin -in pae.bin -sigfile sig.bin
-          [ "$(jq -r '._type' payload.json)" = "https://in-toto.io/Statement/v1" ]
-          [ "$(jq -r '.predicateType' payload.json)" = "https://gradle.com/attestation/publish-repositories/v1" ]
+          printf 'DSSEv1 %s %s %s ' "$TYPE_LEN" "$PAYLOAD_TYPE" "$PAYLOAD_LEN" > "$RUNNER_TEMP/pae.bin"
+          cat "$RUNNER_TEMP/payload.json" >> "$RUNNER_TEMP/pae.bin"
+          echo -n "$SIG_B64" | base64 -d > "$RUNNER_TEMP/sig.bin"
+          openssl pkeyutl -verify -pubin -inkey "$DPG_KEY" -rawin -in "$RUNNER_TEMP/pae.bin" -sigfile "$RUNNER_TEMP/sig.bin"
+          [ "$(jq -r '._type' "$RUNNER_TEMP/payload.json")" = "https://in-toto.io/Statement/v1" ]
+          [ "$(jq -r '.predicateType' "$RUNNER_TEMP/payload.json")" = "https://gradle.com/attestation/publish-repositories/v1" ]
 
-      - name: Verify the signing keyid
-        run: |
-          ENVELOPE_KEYID=$(jq -r '.signatures[0].keyid' attestation.dsse.json)
-          EXPECTED_KEYID=$(echo "$DPG_KEY_SHA256" | cut -c1-6)
-          case "$ENVELOPE_KEYID" in ''|null) exit 1 ;; esac
-          [ "$EXPECTED_KEYID" = "$ENVELOPE_KEYID" ]
-
-      # The repository is accepted with and without the registry's develocity/ namespace:
-      # the publisher omits the namespace from the purl today.
       # A snapshot's OCI tag is snapshot-<first 12 hex of sha256(bundle.tar)>, while its git
       # tag is the moving snapshot tag.
       - name: Verify the subject identity matches this artifact and tag
         run: |
-          ACTUAL_PURL=$(jq -r '.subject[0].name' payload.json)
+          ACTUAL_PURL=$(jq -r '.subject[0].name' "$RUNNER_TEMP/payload.json")
+          case "$ACTUAL_PURL" in ''|null) exit 1 ;; esac
           [ "$(echo "$ACTUAL_PURL" | grep -o '[?&]repository_url=' | wc -l)" -eq 1 ]
           [ "$(echo "$ACTUAL_PURL" | grep -o '[?&]tag=' | wc -l)" -eq 1 ]
           PURL_NAME=$(echo "$ACTUAL_PURL" | sed -n 's/^pkg:oci\/\([^@]*\)@.*/\1/p')
@@ -104,13 +140,9 @@ jobs:
           TAG_QUALIFIER=$(echo "$ACTUAL_PURL" | sed -n 's/.*[?&]tag=\([^&]*\).*/\1/p')
           [ -n "$TAG" ]
           [ -n "$PURL_NAME" ]
-          [ -n "$REPO_URL" ]
           [ -n "$TAG_QUALIFIER" ]
           [ "$PURL_NAME" = "artifact-cache-action-bundle" ]
-          case "$REPO_URL" in
-            "$BUNDLE_REGISTRY%2Fartifact-cache-action-bundle"|"$BUNDLE_REGISTRY%2Fdevelocity%2Fartifact-cache-action-bundle") ;;
-            *) exit 1 ;;
-          esac
+          [ "$REPO_URL" = "$BUNDLE_REGISTRY%2Fartifact-cache-action-bundle" ]
           if [ "$TAG" = "snapshot" ]; then
             BUNDLE_SHA256=$(sha256sum bundle.tar | cut -d' ' -f1)
             [ "$TAG_QUALIFIER" = "snapshot-${BUNDLE_SHA256:0:12}" ]
@@ -120,29 +152,38 @@ jobs:
 
       - name: Verify envelope subject digest equals sha256(manifest JSON)
         run: |
-          SUBJECT_DIGEST=$(jq -r '.subject[0].digest.sha256' payload.json)
+          SUBJECT_DIGEST=$(jq -r '.subject[0].digest.sha256' "$RUNNER_TEMP/payload.json")
           case "$SUBJECT_DIGEST" in ''|null) exit 1 ;; esac
-          sha256sum --check <(echo "$SUBJECT_DIGEST  oci-manifest.json")
+          sha256sum --check --strict <(echo "$SUBJECT_DIGEST  oci-manifest.json")
 
       - name: Verify manifest layers[0].digest equals sha256(bundle.tar)
         run: |
           LAYER_DIGEST=$(jq -r '.layers[0].digest | sub("^sha256:";"")' oci-manifest.json)
           case "$LAYER_DIGEST" in ''|null) exit 1 ;; esac
-          sha256sum --check <(echo "$LAYER_DIGEST  bundle.tar")
+          sha256sum --check --strict <(echo "$LAYER_DIGEST  bundle.tar")
 
+      # The tag may track only the bundle's files, the provenance files, and .github/.
       - name: Verify the action files equal bundle.tar's contents
         run: |
           BUNDLE_DIR="$RUNNER_TEMP/bundle"
           mkdir -p "$BUNDLE_DIR"
-          tar -xf bundle.tar -C "$BUNDLE_DIR"
+          BUNDLE_ENTRY_TYPES=$(tar -tvf bundle.tar | cut -c1 | sort -u | tr -d '\n')
+          case "$BUNDLE_ENTRY_TYPES" in -|-d) ;; *) exit 1 ;; esac
+          tar -xf bundle.tar -C "$BUNDLE_DIR" --no-same-owner
+          NON_REGULAR=$(find "$BUNDLE_DIR" ! -type f ! -type d)
+          [ -z "$NON_REGULAR" ]
           [ -f "$BUNDLE_DIR/action.yml" ]
           [ -d "$BUNDLE_DIR/dist" ]
-          [ -z "$(find "$BUNDLE_DIR" ! -type f ! -type d)" ]
           cmp -- "$BUNDLE_DIR/action.yml" action.yml
+          (cd "$BUNDLE_DIR" && find . -type f -print0) > "$RUNNER_TEMP/bundle-files"
           COMPARED=0
           while IFS= read -r -d '' f; do
             cmp -- "$BUNDLE_DIR/$f" "$f"
             COMPARED=$((COMPARED + 1))
-          done < <(cd "$BUNDLE_DIR" && find . -type f -print0)
+          done < "$RUNNER_TEMP/bundle-files"
           [ "$COMPARED" -gt 0 ]
           diff -r "$BUNDLE_DIR/dist" dist
+          TRACKED=$(git ls-files)
+          BUNDLED=$(tr '\0' '\n' < "$RUNNER_TEMP/bundle-files" | sed 's|^\./||')
+          EXTRA=$(echo "$TRACKED" | grep -vxF -f <(printf '%s\n' "$BUNDLED" attestation.dsse.json bundle.tar oci-manifest.json) | grep -v '^\.github/' || true)
+          [ -z "$EXTRA" ]
