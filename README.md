@@ -303,6 +303,158 @@ plugin's `develocityUrlAllowInsecure` and `allowUntrusted`.
 Both the supplied credential and the exchanged token are registered with the runner as masked
 values, so they are redacted from the workflow log.
 
+### Verifying provenance
+
+Every `v*.*.*` and `snapshot` tag push triggers the `verify-provenance` workflow. The push
+only starts a signal workflow; `verify-provenance` runs on its `workflow_run` event, and GitHub
+always runs a `workflow_run` workflow from the default branch, never from the pushed tag. So a
+tampered tag can't change how it is checked. A tag can avoid starting a run by dropping the
+signal workflow from its own tree, so the workflow also re-verifies every attested tag daily.
+The workflow checks:
+
+1. that the envelope's keyid selects a DPG public key from `.github/keys/` on the default
+   branch whose SHA-256 fingerprint is pinned. The keyid is not signed; it only chooses which
+   pinned key the signature must verify against. Keys are kept after a rotation, so older tags
+   still verify;
+2. the Ed25519 signature over the DSSE envelope (`attestation.dsse.json`) with that key, and
+   that the envelope carries an in-toto statement with the expected predicate type;
+3. that the envelope's subject names this artifact, the registry it is published to, and the
+   pushed tag (for `snapshot`, `snapshot-` followed by the first 12 hex digits of
+   `bundle.tar`'s SHA-256);
+4. a hash chain from the subject digest through `oci-manifest.json` to `bundle.tar`;
+5. that the checked-out `action.yml`, `dist/`, and the other bundled files are byte-identical to
+   `bundle.tar`'s contents, failing on any bundle entry that is not a regular file or directory,
+   and that the tag tracks no other files apart from the three provenance files and `.github/`.
+
+A moving tag such as `snapshot` is re-verified on each move. Pushing a `v<major>` tag runs no
+verification; verify the full-version release tag it points at, which
+`git tag --points-at 'v1^{commit}' --list 'v*.*.*'` lists (for `v1`). The list can include a
+release candidate on the same commit; verify the release tag, since a release candidate's tag
+fails the identity check against the release's envelope. Releases before `v1.1.0` were
+published without provenance and can't be verified.
+
+To verify a tag locally you need bash 4.1 or later, git, GNU coreutils, diffutils, findutils,
+grep, sed, tar, OpenSSL 3, and jq. Copy the script below from the README on the default
+branch of
+[`gradle/develocity-artifact-cache-github-action`](https://github.com/gradle/develocity-artifact-cache-github-action),
+not from the tag you are verifying: it pins the key fingerprints, and a tampered tag can change
+its own copy. Save it as `verify-provenance.sh`, clone that repository with
+`git clone https://github.com/gradle/develocity-artifact-cache-github-action.git` (the script
+needs its full history and `origin/HEAD`, so no `--depth` or `--single-branch`), check out the
+tag, and run the script from the root of the clone with `TAG` set to that tag, for example
+`TAG=v1.2.3 bash verify-provenance.sh`. Pasting it into an interactive shell instead lets
+`set -e` close that shell on the first failure.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+TAG=${TAG:?set TAG to the tag you checked out}
+DPG_KEY_SHA256S="6bce0a45a2caeef7bd185bcb887a4f469279da97b9254e34a5b8e9e349498041"
+BUNDLE_REGISTRY=544741663861.dkr.ecr.eu-central-1.amazonaws.com
+WORK_DIR=$(mktemp -d)
+trap 'rm -rf "$WORK_DIR"' EXIT
+
+# Resolve the tag under verification and the default branch's DPG public keys
+TAG_PATTERN='^(v[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.-]*|snapshot)$'
+[[ "$TAG" =~ $TAG_PATTERN ]]
+KEYS_DIR="$WORK_DIR/keys"
+mkdir -p "$KEYS_DIR"
+git archive origin/HEAD .github/keys | tar -x -C "$KEYS_DIR" --strip-components=2
+
+# Select the pinned DPG public key the envelope names
+ENVELOPE_KEYID=$(jq -r '.signatures[0].keyid' attestation.dsse.json)
+case "$ENVELOPE_KEYID" in ''|null) exit 1 ;; esac
+DPG_KEY=
+for KEY_FILE in "$KEYS_DIR"/*.pem; do
+  KEY_SHA256=$(openssl pkey -pubin -in "$KEY_FILE" -outform DER | openssl dgst -sha256 | sed 's/^.* //')
+  for PINNED_SHA256 in $DPG_KEY_SHA256S; do
+    if [ "$KEY_SHA256" = "$PINNED_SHA256" ] && [ "${PINNED_SHA256:0:6}" = "$ENVELOPE_KEYID" ]; then
+      DPG_KEY=$KEY_FILE
+    fi
+  done
+done
+[ -n "$DPG_KEY" ]
+
+# Verify the DSSE envelope signature
+PAYLOAD_TYPE=$(jq -r '.payloadType' attestation.dsse.json)
+PAYLOAD_B64=$(jq -r '.payload' attestation.dsse.json)
+SIG_B64=$(jq -r '.signatures[0].sig' attestation.dsse.json)
+case "$PAYLOAD_TYPE" in ''|null) exit 1 ;; esac
+case "$PAYLOAD_B64" in ''|null) exit 1 ;; esac
+case "$SIG_B64" in ''|null) exit 1 ;; esac
+[ "$PAYLOAD_TYPE" = "application/vnd.in-toto+json" ]
+echo -n "$PAYLOAD_B64" | base64 -d > "$WORK_DIR/payload.json"
+PAYLOAD_LEN=$(wc -c < "$WORK_DIR/payload.json" | tr -d ' ')
+TYPE_LEN=$(printf '%s' "$PAYLOAD_TYPE" | wc -c | tr -d ' ')
+printf 'DSSEv1 %s %s %s ' "$TYPE_LEN" "$PAYLOAD_TYPE" "$PAYLOAD_LEN" > "$WORK_DIR/pae.bin"
+cat "$WORK_DIR/payload.json" >> "$WORK_DIR/pae.bin"
+echo -n "$SIG_B64" | base64 -d > "$WORK_DIR/sig.bin"
+openssl pkeyutl -verify -pubin -inkey "$DPG_KEY" -rawin -in "$WORK_DIR/pae.bin" -sigfile "$WORK_DIR/sig.bin"
+[ "$(jq -r '._type' "$WORK_DIR/payload.json")" = "https://in-toto.io/Statement/v1" ]
+[ "$(jq -r '.predicateType' "$WORK_DIR/payload.json")" = "https://gradle.com/attestation/publish-repositories/v1" ]
+
+# Verify the subject identity matches this artifact and tag
+ACTUAL_PURL=$(jq -r '.subject[0].name' "$WORK_DIR/payload.json")
+case "$ACTUAL_PURL" in ''|null) exit 1 ;; esac
+[ "$(echo "$ACTUAL_PURL" | grep -o '[?&]repository_url=' | wc -l)" -eq 1 ]
+[ "$(echo "$ACTUAL_PURL" | grep -o '[?&]tag=' | wc -l)" -eq 1 ]
+PURL_NAME=$(echo "$ACTUAL_PURL" | sed -n 's/^pkg:oci\/\([^@]*\)@.*/\1/p')
+REPO_URL=$(echo "$ACTUAL_PURL" | sed -n 's/.*[?&]repository_url=\([^&]*\).*/\1/p')
+TAG_QUALIFIER=$(echo "$ACTUAL_PURL" | sed -n 's/.*[?&]tag=\([^&]*\).*/\1/p')
+[ -n "$TAG" ]
+[ -n "$PURL_NAME" ]
+[ -n "$TAG_QUALIFIER" ]
+[ "$PURL_NAME" = "artifact-cache-action-bundle" ]
+[ "$REPO_URL" = "$BUNDLE_REGISTRY%2Fartifact-cache-action-bundle" ]
+if [ "$TAG" = "snapshot" ]; then
+  BUNDLE_SHA256=$(sha256sum bundle.tar | cut -d' ' -f1)
+  [ "$TAG_QUALIFIER" = "snapshot-${BUNDLE_SHA256:0:12}" ]
+else
+  [ "$TAG_QUALIFIER" = "$TAG" ]
+fi
+
+# Verify envelope subject digest equals sha256(manifest JSON)
+SUBJECT_DIGEST=$(jq -r '.subject[0].digest.sha256' "$WORK_DIR/payload.json")
+case "$SUBJECT_DIGEST" in ''|null) exit 1 ;; esac
+sha256sum --check --strict <(echo "$SUBJECT_DIGEST  oci-manifest.json")
+
+# Verify manifest layers[0].digest equals sha256(bundle.tar)
+LAYER_DIGEST=$(jq -r '.layers[0].digest | sub("^sha256:";"")' oci-manifest.json)
+case "$LAYER_DIGEST" in ''|null) exit 1 ;; esac
+sha256sum --check --strict <(echo "$LAYER_DIGEST  bundle.tar")
+
+# Verify the action files equal bundle.tar's contents
+BUNDLE_DIR="$WORK_DIR/bundle"
+mkdir -p "$BUNDLE_DIR"
+BUNDLE_ENTRY_TYPES=$(tar -tvf bundle.tar | cut -c1 | sort -u | tr -d '\n')
+case "$BUNDLE_ENTRY_TYPES" in -|-d) ;; *) exit 1 ;; esac
+tar -xf bundle.tar -C "$BUNDLE_DIR" --no-same-owner
+NON_REGULAR=$(find "$BUNDLE_DIR" ! -type f ! -type d)
+[ -z "$NON_REGULAR" ]
+[ -f "$BUNDLE_DIR/action.yml" ]
+[ -d "$BUNDLE_DIR/dist" ]
+cmp -- "$BUNDLE_DIR/action.yml" action.yml
+(cd "$BUNDLE_DIR" && find . -type f -print0) > "$WORK_DIR/bundle-files"
+COMPARED=0
+while IFS= read -r -d '' f; do
+  cmp -- "$BUNDLE_DIR/$f" "$f"
+  COMPARED=$((COMPARED + 1))
+done < "$WORK_DIR/bundle-files"
+[ "$COMPARED" -gt 0 ]
+diff -r "$BUNDLE_DIR/dist" dist
+TRACKED=$(git ls-files)
+BUNDLED=$(tr '\0' '\n' < "$WORK_DIR/bundle-files" | sed 's|^\./||')
+EXTRA=$(echo "$TRACKED" | grep -vxF -f <(printf '%s\n' "$BUNDLED" attestation.dsse.json bundle.tar oci-manifest.json) | grep -v '^\.github/' || true)
+[ -z "$EXTRA" ]
+echo "Provenance verified for $TAG"
+```
+
+The script prints `Provenance verified for <tag>` and exits 0 when every check passes, and
+stops at the first command that fails; run it with `bash -x` to see which one. A missing tool,
+the wrong working directory, or a `TAG` that isn't the checked-out tag also stop it, and none
+of those mean the artifacts are bad. If a check fails on an unmodified checkout of the tag,
+don't use that version of the action.
+
 ## Downloading the Artifact Cache CLI
 
 The action downloads the Artifact Cache CLI JAR once, in its main step, and the post step
@@ -343,10 +495,13 @@ release.
 
 ## Cache coverage and observability
 
-The action caches **Gradle, Maven, npm, pip, and Sonar** automatically: it invokes the Artifact Cache
+The action caches **Gradle, Maven, npm, pip, and Sonar** automatically, and from CLI 1.9.0 also the
+**Docker** images on the runner when `docker` is on its `PATH`: it invokes the Artifact Cache
 CLI, which autodetects the matching project content on the runner and caches each type it
 finds, with no per-type enable input. To exclude a type (for example, to skip npm in a
-large monorepo), pass `--no-autodetect <type>` through `additional-cli-args`.
+large monorepo), pass `--no-autodetect <type>` through `additional-cli-args`. To leave some
+Docker images out, pass `--docker-exclude=<pattern>` the same way, where `*` matches anything in the full image
+reference, e.g. `--docker-exclude=registry.example.com/team/*`.
 
 Cache activity is visible in two places:
 
@@ -528,7 +683,7 @@ Some configuration is handled by the CLI rather than exposed as an action input:
 
 - **Cache cleanup** is automatic, so there is no cleanup input.
 - **Cache-type selection** is by autodetection: the CLI detects Gradle, Maven, npm, pip,
-  and Sonar. To exclude a type, pass `--no-autodetect <type>` through
+  and Sonar, and from CLI 1.9.0 Docker. To exclude a type, pass `--no-autodetect <type>` through
   `additional-cli-args`.
 - **Tool homes** are resolved from the standard environment variables CI sets. For a
   non-standard Maven local repository, pass `--maven-repository <path>` through
