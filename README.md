@@ -118,7 +118,7 @@ two things matter:
 | `allow-untrusted` | no | `false` | Accept the endpoint's TLS certificate without verifying it, for the token exchange, the CLI download from its Edge node, and the CLI itself (`--allow-untrusted-server`). A `cli-repository` mirror and redirects away from the endpoint are still verified. Matches the Jenkins plugin's `allowUntrusted` (see [Security](#security)). |
 | `cli-repository-allow-insecure` | no | `false` | Allow the CLI download over plain `http`: from a `cli-repository` mirror, or from the Edge node at an `http` endpoint (which also needs `develocity-url-allow-insecure`). The default rejects `http`; enable only for trusted internal CI without TLS (over `http` the download and any `cli-repository-header` credential, or on the edge route the bearer token, are sent in cleartext). |
 | `cli-sha256` | no | (built in) | Expected JAR SHA-256. Required when `cli-version` pins a version the action does not ship a checksum for; without it, the action refuses that version and skips caching. |
-| `additional-cli-args` | no | (none) | Extra CLI arguments (one per line) appended to restore and store. The action-managed flags (`--dv-server`, `--image-name`, `--cache-metrics-file`, `--dv-edge`, and `--allow-untrusted-server`, which `allow-untrusted` sets) are rejected. |
+| `additional-cli-args` | no | (none) | Extra CLI arguments (one per line) appended to restore and store. The action fails the step on an entry that names a flag it manages: `--dv-server`, `--image-name`, `--cache-metrics-file`, `--dv-edge` or `--allow-untrusted-server` (set `allow-untrusted` instead). An entry names a flag when its first whitespace-delimited token, up to any `=`, is that flag. It also fails the step on an entry that starts with `@`, such as `@args.txt`, because the CLI expands it into arguments the action cannot check. To pass a value that starts with `@`, attach it to its flag, as in `--flag=@value`. The CLI quotes an argument it does not recognize in its output, and the action echoes that output when a phase fails. So the action registers each value of 8 or more characters with `core.setSecret`, whether or not it is a secret. The runner then shows it as `***` in the rest of the job log, including later steps. The mask cannot be removed. A shorter value stays readable. |
 
 ¹ Provide exactly one of `develocity-url` or `develocity-edge-url` — they are mutually exclusive.
 
@@ -143,11 +143,12 @@ Most workflows leave `develocity-auth` unset. Set it to `workload-identity` when
 still reach the action, for example from a shared workflow that passes one to every caller,
 and the job should authenticate with workload identity anyway.
 
-The action logs which credential it used. Outside `develocity-auth: workload-identity`, a key
-that is set is always used, never replaced by an OIDC token, even when it has no entry for the
-endpoint host. If neither credential is available, the action **warns and skips all cache
-activity for the job** rather than failing the build. That includes pull requests from forks,
-which GitHub gives neither secrets nor OIDC tokens.
+The action logs which credential it selected, or the rule that made it skip. Outside
+`develocity-auth: workload-identity`, a key that is set is never replaced by an OIDC token.
+The action **warns and skips all cache activity for the job** when that key is not in
+`host=key` form or has no entry for the endpoint host. It skips the same way when neither
+credential is available, and it never fails the build over either. Pull requests from forks
+are such a case, because GitHub gives them neither secrets nor OIDC tokens.
 
 ### Access key
 
@@ -289,8 +290,8 @@ it lasts about five minutes. An audience set with `develocity-oidc-audience` is 
 other services also accept (GitHub's default, the repository owner URL, for example), the
 token is valid there too. The token only authenticates if a workload identity rule on that
 server matches the repository's claims. A misspelled secret name in such a repository
-therefore authenticates with the rule's permissions rather than failing; the log line naming
-the credential in use shows which one it was.
+therefore authenticates with the rule's permissions rather than failing. The log line naming
+the selected credential shows which one it was.
 
 The action sends a credential only over `https` unless you opt in. An `http` endpoint makes
 the action warn and skip all cache activity before it resolves or mints anything; set
@@ -544,7 +545,7 @@ author can fix, so that it does not hide behind a green run that never caches:
   `cache-read-only`, `develocity-url-allow-insecure`, `cli-repository-allow-insecure`, or
   `allow-untrusted`;
 - a malformed `cli-version`, `cli-repository`, `cli-repository-header`, or `cli-sha256`;
-- an action-managed flag in `additional-cli-args`.
+- an action-managed flag or an entry starting with `@` in `additional-cli-args`.
 
 Problems with the runner or the network, such as a missing JDK, an unreachable download, or
 a refused credential, warn and skip instead. So does an `http` endpoint or `cli-repository`

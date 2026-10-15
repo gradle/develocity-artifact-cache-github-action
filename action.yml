@@ -149,10 +149,18 @@ inputs:
   additional-cli-args:
     description: >-
       Extra arguments appended to every AC CLI restore and store invocation, one
-      argument per line. The flags controlled by the action — --dv-server,
-      --dv-edge, --image-name, --cache-metrics-file, and
-      --allow-untrusted-server (set allow-untrusted instead) — are rejected
-      and fail the step.
+      argument per line. The action fails the step on a line that names a flag it
+      manages: --dv-server, --image-name, --cache-metrics-file, --dv-edge or
+      --allow-untrusted-server (set allow-untrusted instead). A line names a flag
+      when its first whitespace-delimited token, up to any "=", is that flag. It
+      also fails the step on a line that starts with "@", because the CLI expands
+      it into arguments the action cannot check. To pass a value that starts with
+      "@", attach it to its flag, as in "--flag=@value". The CLI quotes an argument it
+      does not recognize in its output, and the action echoes that output when a
+      phase fails. So the action registers each value of 8 or more characters
+      with core.setSecret, whether or not it is a secret. The runner then shows
+      it as *** in the rest of the job log, including later steps. The mask
+      cannot be removed. A shorter value stays readable.
     required: false
   job-status:
     description: >-
